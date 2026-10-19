@@ -43,8 +43,24 @@ CREATE VIRTUAL TABLE IF NOT EXISTS docs USING fts5(
 
 
 def _library_dir() -> Path:
-    # skills/knowledge/skill.py -> repo root -> knowledge/
-    return Path(__file__).resolve().parent.parent.parent / "knowledge"
+    # skills/knowledge/skill.py -> repo root
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _source_files(lib: Path):
+    """All trainable sources: research library + codebase map + self + source."""
+    yield from sorted(lib.glob("knowledge/*.md"))
+    for extra in ["CODEBASE.md", "SELF.md", "JARVIS-RULES.txt"]:
+        p = lib / extra
+        if p.exists():
+            yield p
+    yield from sorted((lib / "jarvis").glob("*.py"))
+    for skill_dir in sorted((lib / "skills").glob("*")):
+        if skill_dir.is_dir():
+            yield from sorted(skill_dir.glob("*.md"))
+            py = skill_dir / "skill.py"
+            if py.exists():
+                yield py
 
 
 def _cache_path(ctx) -> Path:
@@ -55,7 +71,7 @@ def _cache_path(ctx) -> Path:
 
 def _fingerprint(lib: Path) -> str:
     h = hashlib.sha256()
-    for f in sorted(lib.glob("*.md")):
+    for f in _source_files(lib):
         st = f.stat()
         h.update(f"{f.name}:{st.st_size}:{st.st_mtime_ns}".encode())
     return h.hexdigest()
@@ -67,7 +83,7 @@ def _build_index(lib: Path, cache: Path) -> sqlite3.Connection:
     con.execute("DROP TABLE IF EXISTS meta")
     con.execute(_INDEX_SCHEMA)
     con.execute("CREATE TABLE IF NOT EXISTS meta (k TEXT PRIMARY KEY, v TEXT)")
-    for f in sorted(lib.glob("*.md")):
+    for f in _source_files(lib):
         text = f.read_text(encoding="utf-8", errors="replace")
         lines = text.splitlines()
         title = f.stem
@@ -75,8 +91,13 @@ def _build_index(lib: Path, cache: Path) -> sqlite3.Connection:
             if line.startswith("#"):
                 title = line.lstrip("# ").strip()
                 break
+        # Prefix path with source dir for clarity.
+        try:
+            rel = str(f.relative_to(lib))
+        except ValueError:
+            rel = f.name
         con.execute("INSERT INTO docs (path, title, body) VALUES (?, ?, ?)",
-                    (f.name, title, text))
+                    (rel, title, text))
     con.execute("INSERT INTO meta (k, v) VALUES ('fingerprint', ?)",
                 (_fingerprint(lib),))
     con.commit()
