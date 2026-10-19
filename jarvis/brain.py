@@ -191,6 +191,7 @@ class Brain:
         tools: Optional[List[ToolDef]] = None,
         llm_off_machine: bool = False,
         self_knowledge: str = "",
+        self_critique: bool = False,
     ) -> None:
         self.gate = gate
         self.sessions = session_store
@@ -198,6 +199,9 @@ class Brain:
         self.llm_call = llm_call
         self._self_knowledge = self_knowledge
         self.tools: Dict[str, ToolDef] = {t.name: t for t in (tools or [])}
+        # Constitutional self-critique: one extra LLM pass over draft answers.
+        # Off by default (latency); enable when quality > speed.
+        self._self_critique_enabled = self_critique
         # Fail closed: the model destination must be declared. Off-machine
         # calls go through DCL redaction; a missing DCL then raises instead
         # of sending.
@@ -448,10 +452,33 @@ class Brain:
                              "tool_calls": [{"name": n, "args": a} for n, a in payload]
                              if kind == "tools" else []})
             if kind == "answer":
-                self._log(session_id, "brain.reply", {"text": payload},
+                # Constitutional self-critique: check the draft against the
+                # rules before delivering. One extra LLM call; fail-open.
+                final_text = payload
+                if self._self_critique_enabled and len(payload) > 50:
+                    try:
+                        from .self_critique import SelfCritique
+                        rules_text = ""
+                        try:
+                            rules_text = "\n".join(
+                                f"{r.id}: {r.text}" for r in self.rules.all()
+                            ) if hasattr(self.rules, "all") else ""
+                        except Exception:
+                            pass
+                        critic = SelfCritique(self.llm_call, rules_text)
+                        result = critic.review(payload, user_text)
+                        if result.revised and result.final_text:
+                            final_text = result.final_text
+                            self._log(session_id, "brain.self_critique",
+                                      {"violations": result.violations,
+                                       "revised": True},
+                                      causal_parent=last_parent)
+                    except Exception:
+                        pass  # Critique never blocks the answer.
+                self._log(session_id, "brain.reply", {"text": final_text},
                           causal_parent=last_parent, actor="brain",
                           trust="user")
-                return TurnResult(status="answered", text=payload,
+                return TurnResult(status="answered", text=final_text,
                                   tool_calls_made=tool_calls_made,
                                   rounds_used=rounds, history=messages)
 
