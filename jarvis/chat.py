@@ -156,7 +156,7 @@ FIRST_PARTY_SKILLS = ("echo", "notes", "clock", "knowledge", "web")
 
 class ChatApp:
     def __init__(self, base_dir: Path, data_dir: Path,
-                 enable_pc: bool = False, enable_phone: bool = False) -> None:
+                 enable_pc: bool = True, enable_phone: bool = False) -> None:
         self.base_dir = base_dir
         self.data_dir = data_dir
         # Custom API providers live in the data dir.
@@ -220,8 +220,10 @@ class ChatApp:
                     "schema": tool.parameters,
                     "capabilities": list(tool.capabilities),
                 }
-        # Wave 3: PC control tools (capabilities NOT in default allowances —
-        # they need the --pc flag, explicit opt-in per run).
+        # Wave 3: PC control tools. Enabled by default — the owner asked
+        # for full capability ("he can do all the stuff like you do").
+        # Safety comes from the approval gates (tier-2 announces, tier-3
+        # needs explicit approval), not from hiding the tools.
         self._pc = None
         if enable_pc:
             from jarvis import pc_control
@@ -766,8 +768,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="JARVIS v2 Wave-1 text chat")
     ap.add_argument("--data-dir", default=None,
                     help="data directory (default: ./data)")
-    ap.add_argument("--pc", action="store_true",
-                    help="enable PC control tools (explicit opt-in)")
+    ap.add_argument("--pc", action="store_true", default=True,
+                    help="enable PC control tools (default: on)")
+    ap.add_argument("--no-pc", action="store_true",
+                    help="disable PC control tools")
     ap.add_argument("--phone", action="store_true",
                     help="start Telegram phone remote instead of chat")
     ap.add_argument("--voice", action="store_true",
@@ -786,7 +790,7 @@ def main() -> None:
     for w in startup_warnings(data_dir):
         print(f"[warn] {w}")
 
-    app = ChatApp(base_dir, data_dir, enable_pc=args.pc)
+    app = ChatApp(base_dir, data_dir, enable_pc=args.pc and not args.no_pc)
     if args.voice:
         app.start_voice()
     elif args.phone:
