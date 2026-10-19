@@ -237,19 +237,33 @@ class CompatCall:
         self.timeout = timeout
 
     def check_health(self) -> tuple:
+        """Honest health check: validates the key with a real 1-token
+        /chat/completions call. The old /models check lied — several
+        providers leave /models public (200 for ANY key) or 401 valid
+        keys. This costs one tiny request per startup for the truth."""
         if not self.keys:
             return False, f"{self.name}: no keys stored (use /key {self.name} <key>)"
+        body = json.dumps({
+            "model": self.model,
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+            "stream": False,
+        }).encode("utf-8")
         try:
             req = urllib.request.Request(
-                f"{self.base_url}/models",
-                headers={"Authorization": f"Bearer {self.keys[0]}"})
-            with urllib.request.urlopen(req, timeout=8) as resp:
+                f"{self.base_url}/chat/completions", data=body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {self.keys[0]}"},
+                method="POST")
+            with urllib.request.urlopen(req, timeout=15) as resp:
                 resp.read(1024)
-            return True, f"{self.name} up ({len(self.keys)} key(s))"
+            return True, f"{self.name} up ({len(self.keys)} key(s), key works)"
         except urllib.error.HTTPError as exc:
-            # 401 here just means /models needs different scope — the key
-            # may still work for chat. Report honestly.
-            return True, f"{self.name} reachable ({len(self.keys)} key(s), /models: {exc.code})"
+            if exc.code in (401, 403):
+                return False, (f"{self.name}: key rejected ({exc.code}) — "
+                               f"check the key with /keys")
+            return True, (f"{self.name} reachable ({len(self.keys)} key(s), "
+                          f"chat: {exc.code} — may still work)")
         except Exception as exc:
             return False, f"{self.name} unreachable ({exc})"
 

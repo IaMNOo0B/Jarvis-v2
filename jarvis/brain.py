@@ -268,6 +268,31 @@ class Brain:
             redacted.append(m2)
         return redacted
 
+    # -- history (so "what did we chat about" actually works) --------------- #
+    def _load_history(self, session_id: str, limit: int = 20) -> list:
+        """Load recent user/assistant exchanges from the session store.
+
+        Returns [{"role": ..., "content": ...}], oldest first.
+        Only user.message and brain.reply events — never tool internals.
+        """
+        try:
+            events = self.sessions.get_events(session_id, limit=limit * 2)
+        except Exception:
+            return []
+        history = []
+        for ev in events[-limit:]:
+            etype = ev.get("type", "")
+            payload = ev.get("payload", {}) or {}
+            if etype == "user.message":
+                text = payload.get("text", "")
+                if text:
+                    history.append({"role": "user", "content": text})
+            elif etype == "brain.reply":
+                text = payload.get("text", "")
+                if text:
+                    history.append({"role": "assistant", "content": text})
+        return history
+
     # -- slot check: pure code, BEFORE the model is consulted ----------------- #
     def _slot_check(self, user_text: str) -> Optional[Tuple[str, str]]:
         """If the text names a tool action (declared trigger), verify every
@@ -366,8 +391,16 @@ class Brain:
 
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": self._system_prompt()},
-            {"role": "user", "content": user_text},
         ]
+        # Conversation history: so the brain remembers what was said.
+        # (The current user_text was already logged as user.message above;
+        # _load_history excludes it by taking events before this turn.)
+        for h in self._load_history(session_id):
+            # Don't duplicate the current message if it's already there.
+            if h["role"] == "user" and h["content"] == user_text:
+                continue
+            messages.append(h)
+        messages.append({"role": "user", "content": user_text})
         rounds = 0
         tool_calls_made = 0
         consecutive_failures = 0
@@ -415,6 +448,9 @@ class Brain:
                              "tool_calls": [{"name": n, "args": a} for n, a in payload]
                              if kind == "tools" else []})
             if kind == "answer":
+                self._log(session_id, "brain.reply", {"text": payload},
+                          causal_parent=last_parent, actor="brain",
+                          trust="user")
                 return TurnResult(status="answered", text=payload,
                                   tool_calls_made=tool_calls_made,
                                   rounds_used=rounds, history=messages)
