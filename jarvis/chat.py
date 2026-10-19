@@ -144,6 +144,8 @@ class ChatApp:
         from jarvis.skills.registry import SkillRegistry, SkillContext
         from jarvis.gate import Gate, Verdict
         from jarvis.brain import Brain, ToolDef
+        from jarvis.llm_ollama import make_llm_call
+        from jarvis import approvals as approvals_mod
 
         rules_path = base_dir / "JARVIS-RULES.txt"
         if not rules_path.exists():
@@ -223,14 +225,17 @@ class ChatApp:
             tools.append(ToolDef(name=n, description=desc,
                                  parameters=info["schema"], fn=make_fn(n)))
         self._turn_id = 0
+        # Real model if available, stub otherwise (loud banner, never silent).
+        llm_call = make_llm_call(rules=self.rules)
         self.brain = Brain(
             gate=self.gate,
             session_store=self.store,
             rules=self.rules,
-            llm_call=StubLLM(),
+            llm_call=llm_call,
             tools=tools,
-            llm_off_machine=False,  # Wave 1: local only, no DCL redaction needed
+            llm_off_machine=False,  # Wave 2: local only, no DCL redaction needed
         )
+        self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
 
     # -- the turn ---------------------------------------------------------- #
@@ -245,16 +250,38 @@ class ChatApp:
             return
         if result.status == "approval_required":
             req = result.approval_request or {}
-            print(f"[waiting approval] {req.get('tool')} {req.get('args')}")
-            print(result.text)
-            ans = input("Approve? (yes/no): ").strip().lower()
-            if ans in ("yes", "y"):
-                token = (req.get("request") or {}).get("token", "")
-                from jarvis.skills.registry import SkillContext
+            gate_req = req.get("request", {}) or {}
+            tool_info = {"tier": 3, "capabilities": [], "name": req.get("tool", "")}
+            # Recompute tier from the real registry (never trust the dict).
+            for rec in self.registry._records.values():
+                if rec.manifest:
+                    for t in rec.manifest.tools:
+                        if t.name == req.get("tool"):
+                            tool_info = {"tier": t.tier,
+                                         "capabilities": list(t.capabilities),
+                                         "name": t.name}
+            if not hasattr(self, "_approval_budget"):
+                self._approval_budget = self._approvals.ApprovalBudget(
+                    str(self.data_dir / "approval_budget.json"))
+            if not hasattr(self, "_approval_seq"):
+                self._approval_seq = 0
+                import secrets as _secrets
+                words = ["ember", "quartz", "harbor", "meadow", "cipher",
+                         "falcon", "grove", "signal"]
+                self._visual_secret = "-".join(
+                    _secrets.choice(words) for _ in range(3))
+            self._approval_seq += 1
+            areq = self._approvals.ApprovalRequest.from_gate(
+                gate_req, tool_info=tool_info,
+                goal=text, seq_no=self._approval_seq,
+                visual_secret=self._visual_secret)
+            print("[waiting approval] full dialog below")
+            approved = self._approvals.request_approval(
+                areq, budget=self._approval_budget)
+            if approved:
                 decision, out = self.gate.execute_approved(
-                    token, req.get("tool", ""), req.get("args", {}),
-                    executor=self._executor,
-                )
+                    gate_req.get("token", ""), req.get("tool", ""),
+                    req.get("args", {}), executor=self._executor)
                 print(f"[approved] {decision.reason}")
                 if out:
                     print(out[:500])
