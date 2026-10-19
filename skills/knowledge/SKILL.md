@@ -2,14 +2,15 @@
 
 You carry Ovi's entire research library: 70+ deep studies on voice, brain,
 safety, memory, planning, efficiency, and every decision ever calibrated
-for JARVIS. Use it when a question needs depth beyond your training.
+for JARVIS. Use it ONLY for JARVIS-internal topics: how JARVIS works,
+why a design decision was made, voice/brain/safety/memory specs.
 
 ## Tools
 
 ### knowledge_search
 Search the library. Returns the most relevant passages with source files.
-Use it when: the user asks how something works, why a decision was made,
-what the research says, or when you need grounding before answering.
 
-Do NOT search for: the user's personal facts (use memory), the current
-time (use the clock), or anything in the live conversation.
+Do NOT use for general learning ("learn coding", "what is Python",
+"t teach me web development"). For anything NOT about JARVIS itself,
+use web_search instead. The local library knows NOTHING about the
+outside world — reaching for it on a general question is a bug.
