@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re
+import sys
 import tempfile
 import time
 
@@ -234,6 +235,86 @@ class ValidationError:
 # Secrets: OS keyring first, environment fallback. Never logged.
 # ---------------------------------------------------------------------------
 
+class _WinCredBackend:
+    """Windows Credential Manager via ctypes — no dependencies.
+
+    Stores secrets as generic credentials under
+    ``<service>/<name>``. Only constructed on win32; every call is
+    guarded so a failure degrades to "no backend" instead of a crash.
+    """
+
+    def __init__(self, service: str) -> None:
+        import ctypes
+        from ctypes import wintypes
+        self._service = service
+        advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+
+        class CREDENTIALW(ctypes.Structure):
+            _fields_ = [
+                ("Flags", wintypes.DWORD),
+                ("Type", wintypes.DWORD),
+                ("TargetName", wintypes.LPWSTR),
+                ("Comment", wintypes.LPWSTR),
+                ("LastWritten", wintypes.FILETIME),
+                ("CredentialBlobSize", wintypes.DWORD),
+                ("CredentialBlob", ctypes.c_void_p),
+                ("Persist", wintypes.DWORD),
+                ("AttributeCount", wintypes.DWORD),
+                ("Attributes", ctypes.c_void_p),
+                ("TargetAlias", wintypes.LPWSTR),
+                ("UserName", wintypes.LPWSTR),
+            ]
+
+        self._CREDENTIALW = CREDENTIALW
+        self._CredWriteW = advapi32.CredWriteW
+        self._CredWriteW.argtypes = [ctypes.POINTER(CREDENTIALW), wintypes.DWORD]
+        self._CredWriteW.restype = wintypes.BOOL
+        self._CredReadW = advapi32.CredReadW
+        self._CredReadW.argtypes = [wintypes.LPWSTR, wintypes.DWORD,
+                                    wintypes.DWORD,
+                                    ctypes.POINTER(ctypes.POINTER(CREDENTIALW))]
+        self._CredReadW.restype = wintypes.BOOL
+        self._CredFree = advapi32.CredFree
+        self._CredFree.argtypes = [ctypes.c_void_p]
+        # Sanity probe: read a name that cannot exist.
+        self.get_password("definitely-not-a-real-credential-xyz")
+
+    def _target(self, name: str) -> str:
+        return f"{self._service}/{name}"
+
+    def get_password(self, service: str, name: str):  # noqa: ARG002
+        import ctypes
+        from ctypes import wintypes
+        pcred = ctypes.POINTER(self._CREDENTIALW)()
+        ok = self._CredReadW(self._target(name), 1, 0, ctypes.byref(pcred))
+        if not ok:
+            return None
+        try:
+            cred = pcred.contents
+            size = cred.CredentialBlobSize
+            if not size:
+                return None
+            raw = ctypes.string_at(cred.CredentialBlob, size)
+            return raw.decode("utf-16-le")
+        finally:
+            self._CredFree(pcred)
+
+    def set_password(self, service: str, name: str, value: str) -> None:  # noqa: ARG002
+        import ctypes
+        blob = value.encode("utf-16-le")
+        buf = ctypes.create_string_buffer(blob)
+        cred = self._CREDENTIALW()
+        cred.Flags = 0
+        cred.Type = 1  # CRED_TYPE_GENERIC
+        cred.TargetName = self._target(name)
+        cred.CredentialBlobSize = len(blob)
+        cred.CredentialBlob = ctypes.cast(buf, ctypes.c_void_p)
+        cred.Persist = 2  # CRED_PERSIST_LOCAL_MACHINE
+        cred.UserName = self._target(name)
+        if not self._CredWriteW(ctypes.byref(cred), 0):
+            raise OSError("CredWriteW failed")
+
+
 class Secrets:
     """Secret lookup with redaction guarantees.
 
@@ -247,6 +328,8 @@ class Secrets:
 
     def __init__(self, extra_keys: set[str] | frozenset[str] | None = None):
         self._keys = frozenset(SECRET_KEYS) | frozenset(extra_keys or ())
+        self._keyring = None
+        self._wincred = None
         try:
             import keyring  # optional dependency
             # Probe the backend: some installs have keyring with no backend.
@@ -257,6 +340,13 @@ class Secrets:
                 self._keyring = None
         except ImportError:
             self._keyring = None
+        if self._keyring is None and sys.platform == "win32":
+            # No keyring package: use Windows Credential Manager directly
+            # via ctypes. Real OS keyring, zero dependencies.
+            try:
+                self._wincred = _WinCredBackend(self.SERVICE)
+            except Exception:
+                self._wincred = None
 
     @property
     def keys(self) -> frozenset[str]:
@@ -275,16 +365,27 @@ class Secrets:
                     return value
             except Exception as exc:
                 log.warning("keyring read failed for %r: %s", name, exc)
+        if self._wincred is not None:
+            try:
+                value = self._wincred.get_password(self.SERVICE, name)
+                if value:
+                    return value
+            except Exception as exc:
+                log.warning("wincred read failed for %r: %s", name, exc)
         return os.environ.get(f"JARVIS_{name.upper()}", default)
 
     def set(self, name: str, value: str) -> None:
         """Store a secret in the OS keyring. Env vars are read-only."""
-        if self._keyring is None:
-            raise ConfigError(
-                "no keyring backend available; cannot store secrets "
-                "(set JARVIS_<NAME> env var instead, or install keyring)"
-            )
-        self._keyring.set_password(self.SERVICE, name, value)
+        if self._keyring is not None:
+            self._keyring.set_password(self.SERVICE, name, value)
+            return
+        if self._wincred is not None:
+            self._wincred.set_password(self.SERVICE, name, value)
+            return
+        raise ConfigError(
+            "no keyring backend available; cannot store secrets "
+            "(set JARVIS_<NAME> env var instead, or install keyring)"
+        )
 
     def __repr__(self) -> str:  # values never shown
         return f"Secrets(keys={sorted(self._keys)}, values=<redacted>)"

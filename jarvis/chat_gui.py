@@ -73,9 +73,17 @@ class ChatWindow:
         self.entry = tk.Entry(row, font=("Segoe UI", 11))
         self.entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.entry.bind("<Return>", lambda _e: self.send())
+        # Placeholder so it's obvious where to type.
+        self._placeholder = "Type your message here, sir…"
+        self.entry.insert(0, self._placeholder)
+        self.entry.configure(fg="#9e9e9e")
+        self.entry.bind("<FocusIn>", self._clear_placeholder)
+        self.entry.bind("<FocusOut>", self._restore_placeholder)
         send = tk.Button(row, text="Send", command=self.send,
                          font=("Segoe UI", 10, "bold"))
         send.pack(side="right")
+        # Focus the entry so typing works immediately.
+        self.root.after(200, lambda: self.entry.focus_set())
 
         # Approval answers from a Tk modal (the _gui_input_fn hook).
         app._gui_input_fn = self._ask_approval
@@ -85,6 +93,16 @@ class ChatWindow:
         self._say("sys", "JARVIS online — text chat ready, sir.\n")
 
     # -- UI helpers (UI thread only) ------------------------------------ #
+    def _clear_placeholder(self, _event=None) -> None:
+        if self.entry.get() == self._placeholder:
+            self.entry.delete(0, "end")
+            self.entry.configure(fg="#212121")
+
+    def _restore_placeholder(self, _event=None) -> None:
+        if not self.entry.get().strip():
+            self.entry.insert(0, self._placeholder)
+            self.entry.configure(fg="#9e9e9e")
+
     def _say(self, tag: str, text: str) -> None:
         self.view.configure(state="normal")
         self.view.insert("end", text, tag)
@@ -142,6 +160,8 @@ class ChatWindow:
     # -- send path ------------------------------------------------------- #
     def send(self) -> None:
         text = self.entry.get().strip()
+        if text == self._placeholder:
+            text = ""
         if not text or (self._worker and self._worker.is_alive()):
             return
         self.entry.delete(0, "end")
