@@ -302,8 +302,9 @@ class ChatApp:
                 goal=text, seq_no=self._approval_seq,
                 visual_secret=self._visual_secret)
             print("[waiting approval] full dialog below")
+            input_fn = getattr(self, "_gui_input_fn", None) or input
             approved = self._approvals.request_approval(
-                areq, budget=self._approval_budget)
+                areq, budget=self._approval_budget, input_fn=input_fn)
             if approved:
                 decision, out = self.gate.execute_approved(
                     gate_req.get("token", ""), req.get("tool", ""),
@@ -386,6 +387,116 @@ class ChatApp:
             remote.stop()
             print("\n[phone] Stopped.")
 
+    def start_voice(self) -> None:
+        """Wave 4: full voice loop. Needs mic + speakers + models on the PC;
+        without them it says so plainly and stays in text mode."""
+        from jarvis import voice_loop as vl_mod
+        from jarvis import stt as stt_mod
+        from jarvis import tts as tts_mod
+
+        # -- engines: real where installed, loud stub where not ------------- #
+        try:
+            transcriber = stt_mod.FasterWhisperTranscriber()
+        except Exception as exc:
+            print(f"[voice] STT unavailable ({exc}) — voice needs "
+                  "faster-whisper. Staying in text mode, sir.")
+            return
+        engine = tts_mod.pick_engine("auto")
+
+        # -- sentence-buffering audio sink ---------------------------------- #
+        # The loop's Speaker iterates words with no real timing; the tts
+        # engine renders real audio per sentence (synchronous, blocking).
+        # Buffer words per sentence; flush on sentence change; after each
+        # turn flush the remainder only if the turn completed (on interrupt
+        # the buffer is discarded — the user is speaking, we go silent).
+        class _SentenceSink:
+            def __init__(self) -> None:
+                self.buf: list[str] = []
+                self.si = -1
+
+            def __call__(self, word: str, si: int, wi: int) -> None:
+                if si != self.si:
+                    self.flush()
+                    self.si = si
+                self.buf.append(word)
+
+            def flush(self) -> None:
+                if self.buf:
+                    try:
+                        engine.speak_sentence(
+                            " ".join(self.buf), on_word=lambda i: None)
+                    except Exception as exc:
+                        print(f"[voice] tts failed: {exc}")
+                    self.buf = []
+
+            def discard(self) -> None:
+                self.buf = []
+
+        sink = _SentenceSink()
+
+        def brain_fn(text: str) -> str:
+            res = self.brain.respond(self.session_id, text, self._allowances)
+            return str(res)
+
+        def stt_fn(audio: bytes) -> dict:
+            return transcriber.transcribe(audio)
+
+        def wake_fn(chunk: bytes) -> dict:
+            return {"detected": False, "score": 0.0, "word": ""}
+
+        # -- mic adapter: MicStream is an iterator; the loop wants read/close - #
+        class _MicReader:
+            def __init__(self, mic) -> None:
+                self._mic = mic.open()
+                self._it = iter(self._mic)
+                self._closed = False
+
+            def read(self):
+                if self._closed:
+                    return None
+                try:
+                    return next(self._it)
+                except StopIteration:
+                    return None
+                except Exception:
+                    return None
+
+            def close(self) -> None:
+                self._closed = True
+                self._mic.close()
+
+        loop = vl_mod.VoiceLoop(
+            mic_fn=lambda: _MicReader(stt_mod.MicStream()),
+            vad_fn=lambda chunk: bool(stt_mod.vad_segments(chunk, 16000)),
+            wake_fn=wake_fn,
+            stt_fn=stt_fn,
+            brain_fn=brain_fn,
+            audio_out=sink,
+        )
+        print("[voice] Say 'Jarvis'… (Ctrl+C to stop)")
+        try:
+            while True:
+                try:
+                    outcome = loop.wait_for_wake(session_id=self.session_id)
+                except Exception as exc:
+                    print(f"[voice] Cannot start: {exc}")
+                    print("[voice] Staying in text mode, sir.")
+                    return
+                if outcome.status == "mic_closed":
+                    print("[voice] Mic closed.")
+                    break
+                if outcome.status != "wake":
+                    continue
+                turn = loop.run_turn(session_id=self.session_id)
+                if turn.status == "completed":
+                    sink.flush()
+                else:
+                    sink.discard()
+                if turn.status == "error":
+                    print(f"[voice] {turn.reply_text}")
+        except KeyboardInterrupt:
+            print("\n[voice] Stopped. Back to text, sir.")
+
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:
         print("JARVIS v2 — Wave 1 text chat. Type /help. Ctrl+C saves and exits.")
@@ -439,6 +550,8 @@ def main() -> None:
                     help="enable PC control tools (explicit opt-in)")
     ap.add_argument("--phone", action="store_true",
                     help="start Telegram phone remote instead of chat")
+    ap.add_argument("--voice", action="store_true",
+                    help="start voice loop (needs mic + speakers + models)")
     args = ap.parse_args()
     base_dir = Path(__file__).resolve().parent.parent
     data_dir = Path(args.data_dir) if args.data_dir else base_dir / "data"
@@ -452,7 +565,9 @@ def main() -> None:
     print("[preflight] all checks passed.")
 
     app = ChatApp(base_dir, data_dir, enable_pc=args.pc)
-    if args.phone:
+    if args.voice:
+        app.start_voice()
+    elif args.phone:
         app.start_phone()
     else:
         app.run()
