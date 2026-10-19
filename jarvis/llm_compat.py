@@ -22,8 +22,47 @@ from jarvis.brain import ProviderHTTPError
 
 TIMEOUT = 60.0
 
-# Key fingerprinting: prefix -> provider. Lets the owner paste a key
-# without naming the provider — the bot figures it out.
+def _custom_providers_file() -> "Path":
+    from pathlib import Path
+    # Next to the data dir is fine; ChatApp passes its data_dir in.
+    return Path(_custom_dir) / "custom_providers.json" if _custom_dir else \
+        Path.home() / ".jarvis" / "custom_providers.json"
+
+
+_custom_dir: Optional[str] = None
+
+
+def set_custom_dir(path: str) -> None:
+    global _custom_dir
+    _custom_dir = path
+
+
+def get_custom_providers() -> Dict[str, Dict[str, str]]:
+    import json
+    try:
+        return json.loads(_custom_providers_file().read_text())
+    except Exception:
+        return {}
+
+
+def add_custom_provider(name: str, base_url: str, model: str) -> None:
+    import json
+    name = name.strip().lower()
+    if not name or not base_url.startswith(("http://", "https://")):
+        raise ValueError("need a name and an http(s) base_url")
+    providers = get_custom_providers()
+    providers[name] = {"base_url": base_url.rstrip("/"), "model": model.strip()}
+    f = _custom_providers_file()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".tmp")
+    tmp.write_text(json.dumps(providers, indent=2))
+    tmp.replace(f)
+
+
+def all_presets() -> Dict[str, Dict[str, str]]:
+    merged = dict(PRESETS)
+    merged.update(get_custom_providers())
+    return merged
 KEY_PREFIXES: Dict[str, str] = {
     "gsk_": "groq",
     "sk-or-": "openrouter",
@@ -56,7 +95,7 @@ def probe_key(key: str, timeout: float = 8.0) -> Optional[str]:
     """
     import urllib.request
     import urllib.error
-    for pname, preset in PRESETS.items():
+    for pname, preset in all_presets().items():
         try:
             req = urllib.request.Request(
                 f"{preset['base_url'].rstrip('/')}/models",
@@ -105,6 +144,26 @@ PRESETS: Dict[str, Dict[str, str]] = {
     "chutes": {
         "base_url": "https://llm.chutes.ai/v1",
         "model": "deepseek-ai/DeepSeek-R1",
+    },
+    "deepseek": {
+        "base_url": "https://api.deepseek.com/v1",
+        "model": "deepseek-chat",
+    },
+    "xai": {
+        "base_url": "https://api.x.ai/v1",
+        "model": "grok-4",
+    },
+    "together": {
+        "base_url": "https://api.together.xyz/v1",
+        "model": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+    },
+    "fireworks": {
+        "base_url": "https://api.fireworks.ai/inference/v1",
+        "model": "accounts/fireworks/models/llama-v3p3-70b-instruct",
+    },
+    "perplexity": {
+        "base_url": "https://api.perplexity.ai",
+        "model": "sonar-pro",
     },
 }
 
@@ -261,7 +320,7 @@ def make_compat_providers(only: Optional[List[str]] = None,
     """Build providers for every preset with stored keys. Keyless presets
     are skipped here (Pollinations covers that)."""
     providers = []
-    for pname, preset in PRESETS.items():
+    for pname, preset in all_presets().items():
         if only is not None and pname not in only:
             continue
         keys = _get_keys(f"{pname}_api_key")

@@ -137,6 +137,9 @@ class ChatApp:
                  enable_pc: bool = False, enable_phone: bool = False) -> None:
         self.base_dir = base_dir
         self.data_dir = data_dir
+        # Custom API providers live in the data dir.
+        from jarvis.llm_compat import set_custom_dir
+        set_custom_dir(str(data_dir))
         self._allowances = list(TURN_ALLOWANCES)
         if enable_pc:
             self._allowances += ["ui.read", "ui.control", "shell.exec"]
@@ -543,8 +546,8 @@ class ChatApp:
     # -- API key management (/key, /keys) ---------------------------------- #
     @staticmethod
     def _key_providers() -> set:
-        from jarvis.llm_compat import PRESETS
-        return set(PRESETS) | {"omniroute", "telegram_bot"}
+        from jarvis.llm_compat import all_presets, set_custom_dir
+        return set(all_presets()) | {"omniroute", "telegram_bot"}
 
     def _store_key(self, provider: str, key: str) -> None:
         """Store a key in the OS keyring. Numbered slots for multiples."""
@@ -647,6 +650,22 @@ class ChatApp:
                     n = self._count_keys(pname)
                     mark = f"{n} key(s)" if n else "no key"
                     print(f"  - {pname}: {mark}")
+                continue
+            if text.startswith("/provider "):
+                # /provider <name> <base_url> <model> — register any
+                # OpenAI-compatible API (any company).
+                from jarvis.llm_compat import add_custom_provider
+                parts = text[10:].strip().split(None, 2)
+                if len(parts) != 3:
+                    print("[keys] Use: /provider <name> <base_url> <model>")
+                    print("[keys] Example: /provider myco https://api.myco.ai/v1 my-model")
+                    continue
+                try:
+                    add_custom_provider(*parts)
+                    print(f"[keys] Provider '{parts[0].lower()}' registered. "
+                          f"Now paste its key: /key {parts[0].lower()} <key>")
+                except ValueError as exc:
+                    print(f"[keys] {exc}")
                 continue
             self.turn(text)
 
