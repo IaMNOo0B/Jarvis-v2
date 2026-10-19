@@ -278,57 +278,59 @@ class ChatApp:
             tools.append(ToolDef(name=n, description=desc,
                                  parameters=info["schema"], fn=make_fn(n)))
         self._turn_id = 0
-        # Brain chain: local Ollama → OmniRoute (free cloud models) → stub.
+        # Brain chain: smartest first. If the owner has cloud API keys,
+        # those models (Gemini, Kimi, GPT-OSS...) answer first — they're
+        # far smarter than the local 7B. Local Ollama is the offline
+        # fallback. Keyless Pollinations is the last resort before stub.
         # Each link is loud about its own absence; nothing is ever silent.
         from jarvis.brain import FallbackChain, chain_as_llm_call
         from jarvis.llm_ollama import make_llm_call, OllamaProvider, OllamaCall
-        providers = []
+        ollama_provider = None
         try:
             ollama_call = OllamaCall(rules=self.rules)
             ok, _ = ollama_call.check_health()
             if ok:
-                providers.append(OllamaProvider(ollama_call))
+                ollama_provider = OllamaProvider(ollama_call)
         except Exception:
             pass
+        omni_provider = None
         try:
             from jarvis.llm_omniroute import make_omniroute_call, OmniRouteProvider
             omni_model = self.config.get("brain.omniroute_model",
                                          "google/gemini-2.5-flash")
             omni_call = make_omniroute_call(model=omni_model)
             if omni_call is not None:
-                providers.append(OmniRouteProvider(omni_call))
+                omni_provider = OmniRouteProvider(omni_call)
         except Exception:
             pass
+        poll_provider = None
         try:
             # Keyless cloud brain — zero setup, works out of the box.
             from jarvis.llm_pollinations import (
                 make_pollinations_call, PollinationsProvider)
             poll_call = make_pollinations_call()
             if poll_call is not None:
-                providers.append(PollinationsProvider(poll_call))
+                poll_provider = PollinationsProvider(poll_call)
         except Exception:
             pass
+        keyed = []
         try:
             # The owner's key vault: every stored key becomes a provider,
-            # with per-provider rotation. Keyed beats keyless (F-04: build
-            # the order explicitly — never assume list positions).
+            # with per-provider rotation.
             from jarvis.llm_compat import make_compat_providers
             keyed = make_compat_providers(data_dir=str(self.data_dir))
-            if keyed:
-                # Rebuild: local → omniroute → keyed → keyless pollinations.
-                ordered: list = []
-                keyless = None
-                for p in providers:
-                    if getattr(p, "name", "") == "pollinations":
-                        keyless = p
-                    else:
-                        ordered.append(p)
-                ordered.extend(keyed)
-                if keyless is not None:
-                    ordered.append(keyless)
-                providers = ordered
         except Exception:
             pass
+        # Order: keyed cloud (smartest) -> Ollama local -> OmniRoute ->
+        # keyless Pollinations. The owner's keys win when they exist.
+        providers = []
+        providers.extend(keyed)
+        if ollama_provider is not None:
+            providers.append(ollama_provider)
+        if omni_provider is not None:
+            providers.append(omni_provider)
+        if poll_provider is not None:
+            providers.append(poll_provider)
         if providers:
             chain = FallbackChain.local_first(*providers)
             llm_call = chain_as_llm_call(chain)
