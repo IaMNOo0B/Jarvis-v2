@@ -251,8 +251,41 @@ class ChatApp:
             tools.append(ToolDef(name=n, description=desc,
                                  parameters=info["schema"], fn=make_fn(n)))
         self._turn_id = 0
-        # Real model if available, stub otherwise (loud banner, never silent).
-        llm_call = make_llm_call(rules=self.rules)
+        # Brain chain: local Ollama → OmniRoute (free cloud models) → stub.
+        # Each link is loud about its own absence; nothing is ever silent.
+        from jarvis.brain import FallbackChain, chain_as_llm_call
+        from jarvis.llm_ollama import make_llm_call, OllamaProvider, OllamaCall
+        providers = []
+        try:
+            ollama_call = OllamaCall(rules=self.rules)
+            ok, _ = ollama_call.check_health()
+            if ok:
+                providers.append(OllamaProvider(ollama_call))
+        except Exception:
+            pass
+        try:
+            from jarvis.llm_omniroute import make_omniroute_call, OmniRouteProvider
+            omni_model = self.config.get("brain.omniroute_model",
+                                         "google/gemini-2.5-flash")
+            omni_call = make_omniroute_call(model=omni_model)
+            if omni_call is not None:
+                providers.append(OmniRouteProvider(omni_call))
+        except Exception:
+            pass
+        try:
+            # Keyless cloud brain — zero setup, works out of the box.
+            from jarvis.llm_pollinations import (
+                make_pollinations_call, PollinationsProvider)
+            poll_call = make_pollinations_call()
+            if poll_call is not None:
+                providers.append(PollinationsProvider(poll_call))
+        except Exception:
+            pass
+        if providers:
+            chain = FallbackChain.local_first(*providers)
+            llm_call = chain_as_llm_call(chain)
+        else:
+            llm_call = make_llm_call(rules=self.rules)
         self.brain = Brain(
             gate=self.gate,
             session_store=self.store,
