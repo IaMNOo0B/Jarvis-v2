@@ -129,7 +129,7 @@ TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read"]
 
 # First-party skills ship WITH v2: approved at first run (the voicebox
 # pattern — first-party skips approval, never the sandbox).
-FIRST_PARTY_SKILLS = ("echo", "notes", "clock")
+FIRST_PARTY_SKILLS = ("echo", "notes", "clock", "knowledge")
 
 
 class ChatApp:
