@@ -621,6 +621,7 @@ class ChatApp:
             print("Commands: /quit, /session (show session id), "
                   "/skills (list), /memory <fact> (remember), /recall <q>, "
                   "/key <paste-your-key> (store API key), /keys (list), "
+                  "/keymove <wrong> <right> (fix misidentified key), "
                   "/provider <name> <url> <model> (add company)")
             return True
         if text == "/session":
@@ -680,6 +681,49 @@ class ChatApp:
                 n = self._count_keys(pname)
                 mark = f"{n} key(s)" if n else "no key"
                 print(f"  - {pname}: {mark}")
+            return True
+        if text.startswith("/keymove "):
+            # /keymove <wrong-provider> <right-provider> — move the most
+            # recently stored key when auto-detect guessed wrong.
+            # ("no that's a gemini key" -> /keymove openrouter gemini)
+            from jarvis.config import Secrets
+            parts = text[9:].strip().split(None, 1)
+            if len(parts) != 2:
+                print("[keys] Use: /keymove <wrong-provider> <right-provider>")
+                return True
+            wrong, right = parts[0].lower(), parts[1].lower()
+            providers = self._key_providers()
+            if wrong not in providers or right not in providers:
+                print(f"[keys] Unknown provider. Known: " +
+                      ", ".join(sorted(providers)))
+                return True
+            if wrong == right:
+                print("[keys] Same provider — nothing to move.")
+                return True
+            secrets = Secrets(data_dir=str(self.data_dir))
+            # Find the last slot under the wrong provider.
+            base_wrong = f"{wrong}_api_key"
+            slot, key = None, None
+            i = 2
+            last = secrets.get(base_wrong)
+            if last:
+                slot, key = base_wrong, last
+                while True:
+                    extra = secrets.get(f"{base_wrong}_{i}")
+                    if not extra:
+                        break
+                    slot, key = f"{base_wrong}_{i}", extra
+                    i += 1
+            if key is None:
+                print(f"[keys] No key stored under {wrong}.")
+                return True
+            # Wipe it from the wrong provider (overwrite, then rely on
+            # get() returning falsy for empty).
+            secrets.set(slot, "")
+            # Store under the right provider (reuses numbered slots).
+            self._store_key(right, key)
+            print(f"[keys] Moved last {wrong} key -> {right}. "
+                  f"Restart JARVIS to use it, sir.")
             return True
         if text.startswith("/provider "):
             # /provider <name> <base_url> <model> — register any

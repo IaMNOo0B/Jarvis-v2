@@ -87,27 +87,40 @@ def fingerprint_key(key: str) -> Optional[str]:
     return None
 
 
-def probe_key(key: str, timeout: float = 8.0) -> Optional[str]:
-    """Ask each preset's /models endpoint: 200 = this provider, 401 = not.
+def probe_key(key: str, timeout: float = 15.0) -> Optional[str]:
+    """Ask each preset: is this key yours?
 
+    Uses a minimal /chat/completions call (max_tokens=1). 200 = this
+    provider, 401/403 = not. We do NOT use /models because several
+    providers (OpenRouter, etc.) leave it public — it returns 200 for
+    ANY key, which misidentified keys (the "that's a gemini key" bug).
     Only used when the prefix is unknown. The key is sent solely to the
     provider endpoints it might belong to — its intended use.
     """
+    import json
     import urllib.request
     import urllib.error
+    key = key.strip()
     for pname, preset in all_presets().items():
+        body = json.dumps({
+            "model": preset["model"],
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 1,
+            "stream": False,
+        }).encode("utf-8")
         try:
             req = urllib.request.Request(
-                f"{preset['base_url'].rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {key.strip()}"})
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                if resp.status == 200:
-                    return pname
+                f"{preset['base_url'].rstrip('/')}/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json",
+                         "Authorization": f"Bearer {key}"},
+                method="POST")
+            with urllib.request.urlopen(req, timeout=timeout):
+                return pname  # 200 — this key works here
         except urllib.error.HTTPError as exc:
-            if exc.code == 401:
-                continue  # key rejected here — not this provider
-            # Other HTTP codes: endpoint reachable, key might be fine
-            # (some providers 403 /models on valid keys). Keep looking.
+            if exc.code in (401, 403):
+                continue  # key rejected — not this provider
+            # 404/429/5xx: inconclusive, keep looking
             continue
         except Exception:
             continue
