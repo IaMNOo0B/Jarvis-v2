@@ -348,6 +348,13 @@ class ChatApp:
             self_md = base_dir / "SELF.md"
             if self_md.exists():
                 self_knowledge = self_md.read_text(encoding="utf-8").strip()
+            # Teaching: lessons from Ovi. Loaded from TEACHING.md so JARVIS
+            # learns like a student, not just reads a manual.
+            teaching_md = base_dir / "TEACHING.md"
+            if teaching_md.exists():
+                teaching = teaching_md.read_text(encoding="utf-8").strip()
+                if teaching:
+                    self_knowledge += "\n\n--- LESSONS FROM YOUR TEACHER ---\n" + teaching
         except Exception:
             pass
         self.brain = Brain(
