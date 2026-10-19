@@ -1,0 +1,12 @@
+# JARVIS v2 — never commit these.
+# data/ holds private chats, sessions, and the local search index.
+data/
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.log
+__pycache__/
+*.pyc
+.DS_Store
+Thumbs.db
