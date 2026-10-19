@@ -62,14 +62,14 @@ class ChatWindow:
         self.view = scrolledtext.ScrolledText(
             self.root, wrap="word", state="disabled",
             font=("Segoe UI", 11), padx=10, pady=10)
-        self.view.pack(fill="both", expand=True, padx=10, pady=8)
         self.view.tag_config("you", foreground="#1565c0")
         self.view.tag_config("jarvis", foreground="#212121")
         self.view.tag_config("sys", foreground="#757575", font=("Segoe UI", 9, "italic"))
 
-        # Input row
+        # Input row — packed FIRST with side="bottom" so it can never be
+        # squeezed out by the expanding message view (Windows DPI bug).
         row = tk.Frame(self.root)
-        row.pack(fill="x", padx=10, pady=(0, 10))
+        row.pack(side="bottom", fill="x", padx=10, pady=(0, 10))
         self.entry = tk.Entry(row, font=("Segoe UI", 11))
         self.entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
         self.entry.bind("<Return>", lambda _e: self.send())
@@ -82,6 +82,8 @@ class ChatWindow:
         send = tk.Button(row, text="Send", command=self.send,
                          font=("Segoe UI", 10, "bold"))
         send.pack(side="right")
+        # Message view fills whatever is left.
+        self.view.pack(side="top", fill="both", expand=True, padx=10, pady=8)
         # Focus the entry so typing works immediately.
         self.root.after(200, lambda: self.entry.focus_set())
 
@@ -134,6 +136,16 @@ class ChatWindow:
                     self._set_status("ready", "#2e7d32")
                     self.entry.configure(state="normal")
         except queue.Empty:
+            pass
+        # Watchdog: the entry must NEVER be stuck disabled while the app
+        # is ready and no turn is running. (Stuck-disabled was the
+        # "can't click to type" bug.)
+        try:
+            worker_alive = self._worker is not None and self._worker.is_alive()
+            if (self.app is not None and not worker_alive
+                    and str(self.entry.cget("state")) == "disabled"):
+                self.entry.configure(state="normal")
+        except Exception:
             pass
         self.root.after(80, self._drain)
 
