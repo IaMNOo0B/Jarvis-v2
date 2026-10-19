@@ -281,6 +281,16 @@ class ChatApp:
                 providers.append(PollinationsProvider(poll_call))
         except Exception:
             pass
+        try:
+            # The owner's key vault: every stored key becomes a provider,
+            # with per-provider rotation. Keyed beats keyless.
+            from jarvis.llm_compat import make_compat_providers
+            keyed = make_compat_providers()
+            # Insert keyed providers before the keyless one.
+            if keyed:
+                providers[-1:] = keyed + providers[-1:]
+        except Exception:
+            pass
         if providers:
             chain = FallbackChain.local_first(*providers)
             llm_call = chain_as_llm_call(chain)
@@ -530,6 +540,36 @@ class ChatApp:
         except KeyboardInterrupt:
             print("\n[voice] Stopped. Back to text, sir.")
 
+    # -- API key management (/key, /keys) ---------------------------------- #
+    @staticmethod
+    def _key_providers() -> set:
+        from jarvis.llm_compat import PRESETS
+        return set(PRESETS) | {"omniroute", "telegram_bot"}
+
+    def _store_key(self, provider: str, key: str) -> None:
+        """Store a key in the OS keyring. Numbered slots for multiples."""
+        from jarvis.config import Secrets
+        secrets = Secrets()
+        base = f"{provider}_api_key"
+        if secrets.get(base):
+            i = 2
+            while secrets.get(f"{base}_{i}"):
+                i += 1
+            secrets.set(f"{base}_{i}", key)
+        else:
+            secrets.set(base, key)
+
+    def _count_keys(self, provider: str) -> int:
+        from jarvis.config import Secrets
+        secrets = Secrets()
+        base = f"{provider}_api_key"
+        n = 1 if secrets.get(base) else 0
+        i = 2
+        while secrets.get(f"{base}_{i}"):
+            n += 1
+            i += 1
+        return n
+
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:
         print("JARVIS v2 — Wave 1 text chat. Type /help. Ctrl+C saves and exits.")
@@ -547,7 +587,8 @@ class ChatApp:
                 break
             if text == "/help":
                 print("Commands: /quit, /session (show session id), "
-                      "/skills (list), /memory <fact> (remember), /recall <q>")
+                      "/skills (list), /memory <fact> (remember), /recall <q>, "
+                      "/key <provider> <key> (store API key), /keys (list providers)")
                 continue
             if text == "/session":
                 print(f"[session] {self.session_id}")
@@ -571,6 +612,41 @@ class ChatApp:
                 for hit in self.memory.recall(text[8:].strip())[:5]:
                     flag = " [quarantined]" if hit.get("quarantined") else ""
                     print(f"  - {hit.get('snippet', '')[:120]}{flag}")
+                continue
+            if text.startswith("/key "):
+                # /key <key>            — bot figures out the provider
+                # /key <provider> <key> — explicit (overrides detection)
+                # The key value is NEVER printed, logged, or stored elsewhere.
+                from jarvis.llm_compat import (
+                    fingerprint_key, probe_key, PRESETS)
+                rest = text[5:].strip()
+                parts = rest.split(None, 1)
+                pname, key = None, None
+                if len(parts) == 2 and parts[0].lower() in self._key_providers():
+                    pname, key = parts[0].lower(), parts[1].strip()
+                elif len(parts) >= 1:
+                    key = parts[-1].strip() if len(parts) == 2 else parts[0].strip()
+                    pname = fingerprint_key(key)
+                    if pname is None:
+                        print("[keys] Detecting provider…")
+                        pname = probe_key(key)
+                if not key:
+                    print("[keys] Use: /key <paste-your-key>")
+                    continue
+                if pname is None or pname not in self._key_providers():
+                    print("[keys] Couldn't identify that key. Known: " +
+                          ", ".join(sorted(self._key_providers())))
+                    print("[keys] Or be explicit: /key <provider> <key>")
+                    continue
+                self._store_key(pname, key)
+                print(f"[keys] That's a {pname} key — stored (keyring, never shown). "
+                      f"Restart JARVIS to use it, sir.")
+                continue
+            if text == "/keys":
+                for pname in sorted(self._key_providers()):
+                    n = self._count_keys(pname)
+                    mark = f"{n} key(s)" if n else "no key"
+                    print(f"  - {pname}: {mark}")
                 continue
             self.turn(text)
 
