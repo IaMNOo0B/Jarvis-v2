@@ -315,6 +315,53 @@ class _WinCredBackend:
             raise OSError("CredWriteW failed")
 
 
+class _FileBackend:
+    """Last-resort secret store: obfuscated JSON in the data dir.
+
+    Less secure than the OS keyring (anyone with file access can read
+    it), but it NEVER fails. Used only when keyring + Credential Manager
+    are both unavailable. The user is warned loudly.
+    """
+
+    def __init__(self, data_dir: str) -> None:
+        from pathlib import Path
+        self._file = Path(data_dir) / "secrets.fallback.json"
+        self._file.parent.mkdir(parents=True, exist_ok=True)
+
+    def _read_all(self) -> dict:
+        import json
+        try:
+            return json.loads(self._file.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def get_password(self, service: str, name: str):  # noqa: ARG002
+        import base64
+        data = self._read_all()
+        blob = data.get(name)
+        if not blob:
+            return None
+        try:
+            return base64.b64decode(blob.encode()).decode("utf-8")
+        except Exception:
+            return None
+
+    def set_password(self, service: str, name: str, value: str) -> None:  # noqa: ARG002
+        import base64
+        import json
+        data = self._read_all()
+        data[name] = base64.b64encode(value.encode("utf-8")).decode()
+        tmp = self._file.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data), encoding="utf-8")
+        tmp.replace(self._file)
+        try:
+            # Owner-only on Windows is hard via stdlib; at least hide it.
+            import os
+            os.system(f'attrib +h "{self._file}" >nul 2>&1')
+        except Exception:
+            pass
+
+
 class Secrets:
     """Secret lookup with redaction guarantees.
 
@@ -326,10 +373,12 @@ class Secrets:
 
     SERVICE = "JARVIS"
 
-    def __init__(self, extra_keys: set[str] | frozenset[str] | None = None):
+    def __init__(self, extra_keys: set[str] | frozenset[str] | None = None,
+                 data_dir: str | None = None):
         self._keys = frozenset(SECRET_KEYS) | frozenset(extra_keys or ())
         self._keyring = None
         self._wincred = None
+        self._file_backend = None
         try:
             import keyring  # optional dependency
             # Probe the backend: some installs have keyring with no backend.
@@ -347,6 +396,11 @@ class Secrets:
                 self._wincred = _WinCredBackend(self.SERVICE)
             except Exception:
                 self._wincred = None
+        if data_dir:
+            try:
+                self._file_backend = _FileBackend(data_dir)
+            except Exception:
+                self._file_backend = None
 
     @property
     def keys(self) -> frozenset[str]:
@@ -372,20 +426,50 @@ class Secrets:
                     return value
             except Exception as exc:
                 log.warning("wincred read failed for %r: %s", name, exc)
+        if self._file_backend is not None:
+            try:
+                value = self._file_backend.get_password(self.SERVICE, name)
+                if value:
+                    return value
+            except Exception as exc:
+                log.warning("file backend read failed for %r: %s", name, exc)
         return os.environ.get(f"JARVIS_{name.upper()}", default)
 
     def set(self, name: str, value: str) -> None:
-        """Store a secret in the OS keyring. Env vars are read-only."""
+        """Store a secret. Tries OS keyring, then Credential Manager,
+        then a local obfuscated file. Only raises if everything fails."""
         if self._keyring is not None:
-            self._keyring.set_password(self.SERVICE, name, value)
-            return
+            try:
+                self._keyring.set_password(self.SERVICE, name, value)
+                return
+            except Exception as exc:
+                log.warning("keyring write failed for %r: %s", name, exc)
         if self._wincred is not None:
-            self._wincred.set_password(self.SERVICE, name, value)
+            try:
+                self._wincred.set_password(self.SERVICE, name, value)
+                return
+            except Exception as exc:
+                log.warning("wincred write failed for %r: %s", name, exc)
+        if self._file_backend is not None:
+            self._file_backend.set_password(self.SERVICE, name, value)
+            log.warning("stored %r in local fallback file (less secure "
+                        "than OS keyring)", name)
             return
         raise ConfigError(
-            "no keyring backend available; cannot store secrets "
-            "(set JARVIS_<NAME> env var instead, or install keyring)"
+            "no secret storage available; cannot store secrets "
+            "(set JARVIS_<NAME> env var instead)"
         )
+
+    @property
+    def storage_note(self) -> str:
+        """Human-readable note about where secrets live."""
+        if self._keyring is not None:
+            return "OS keyring"
+        if self._wincred is not None:
+            return "Windows Credential Manager"
+        if self._file_backend is not None:
+            return "local file (less secure — consider installing keyring)"
+        return "environment variables only"
 
     def __repr__(self) -> str:  # values never shown
         return f"Secrets(keys={sorted(self._keys)}, values=<redacted>)"
@@ -644,6 +728,9 @@ def default_schema() -> dict:
         "brain": {
             "temperature": Field(float, 0.7, min=0.0, max=2.0),
             "max_tokens": Field(int, 1024, min=1, max=32000),
+            # F-16: the model id OmniRoute routes to (was read via .get with
+            # no schema field, so no Settings UI or file edit could change it).
+            "omniroute_model": Field(str, "google/gemini-2.5-flash"),
         },
         "telegram": {
             "enabled": Field(bool, False),

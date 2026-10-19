@@ -249,6 +249,11 @@ def main() -> None:
     # with "warming up…"; the app attaches when its health probes finish.
     window = ChatWindow(None)
 
+    # F-13: OneDrive-synced data dir — warn in a dialog (no terminal here).
+    from jarvis.chat import startup_warnings
+    for w in startup_warnings(data_dir):
+        tk.messagebox.showwarning("JARVIS — storage warning", w)
+
     def build() -> None:
         try:
             app = ChatApp(base_dir, data_dir)

@@ -170,5 +170,5 @@ def test_redact_uses_secret_registry():
 def test_secrets_set_without_keyring_raises(monkeypatch):
     s = Secrets()
     s._keyring = None
-    with pytest.raises(ConfigError, match="no keyring backend"):
+    with pytest.raises(ConfigError, match="no secret storage available"):
         s.set("gemini_api_key", "whatever")

@@ -194,7 +194,7 @@ def _to_openai_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def _get_keys(secret_name: str) -> List[str]:
+def _get_keys(secret_name: str, data_dir: Optional[str] = None) -> List[str]:
     """All keys for a provider: keyring first, env fallback.
 
     Numbered env vars allow many keys without the keyring:
@@ -203,7 +203,7 @@ def _get_keys(secret_name: str) -> List[str]:
     keys: List[str] = []
     try:
         from jarvis.config import Secrets
-        secrets = Secrets()
+        secrets = Secrets(data_dir=data_dir)
         # Keyring holds one value per name; numbered slots hold the rest.
         first = secrets.get(secret_name)
         if first:
@@ -316,14 +316,15 @@ class CompatProvider:
 
 
 def make_compat_providers(only: Optional[List[str]] = None,
-                          quiet: bool = False) -> List[CompatProvider]:
+                          quiet: bool = False,
+                          data_dir: Optional[str] = None) -> List[CompatProvider]:
     """Build providers for every preset with stored keys. Keyless presets
     are skipped here (Pollinations covers that)."""
     providers = []
     for pname, preset in all_presets().items():
         if only is not None and pname not in only:
             continue
-        keys = _get_keys(f"{pname}_api_key")
+        keys = _get_keys(f"{pname}_api_key", data_dir=data_dir)
         if not keys:
             continue
         call = CompatCall(pname, preset["base_url"], preset["model"], keys)

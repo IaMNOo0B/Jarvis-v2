@@ -81,7 +81,10 @@ DEFAULT_BASE_URL = "http://localhost:11434"
 DEFAULT_MODEL = "qwen2.5:7b-instruct-q4_K_M"
 DEFAULT_TIMEOUT = 120.0  # seconds; local model, generous but finite
 HEALTH_TIMEOUT = 10.0    # health probes must be quick
-CTX_WINDOW = 4096        # 4k-physical strategy (brain-spec §5)
+CTX_WINDOW = 2048        # F-14: 2060/6GB VRAM headroom. 4.7GB weights +
+                        # ~0.5GB KV @4k + Win11 display reservation (~0.5GB)
+                        # ≈ 5.7GB — borderline; Ollama would silently
+                        # partial-offload to CPU (3-5 tok/s). 2048 halves KV.
 
 
 class OllamaCall:

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import traceback
 from pathlib import Path
@@ -45,6 +46,27 @@ def preflight(base_dir: Path, data_dir: Path) -> list[str]:
     except Exception as exc:
         problems.append(f"data dir not writable: {data_dir} ({exc})")
     return problems
+
+
+def startup_warnings(data_dir: Path) -> list[str]:
+    """Non-fatal first-run warnings (F-13). Checked separately from
+    preflight because they advise, not refuse."""
+    warnings: list[str] = []
+    try:
+        onedrive = os.environ.get("OneDrive") or os.environ.get("OneDriveConsumer")
+        if onedrive:
+            data_str = str(data_dir.resolve())
+            od_str = str(Path(onedrive).resolve())
+            if data_str.lower().startswith(od_str.lower()):
+                warnings.append(
+                    "data/ lives inside a OneDrive-synced folder. OneDrive's "
+                    "sync locks fight SQLite (sessions.db) and can corrupt "
+                    "or duplicate your chats. Move the repo out of Documents, "
+                    "or pass --data-dir to a non-synced folder."
+                )
+    except Exception:
+        pass
+    return warnings
 
 
 # --------------------------------------------------------------------------- #
@@ -289,7 +311,7 @@ class ChatApp:
             # with per-provider rotation. Keyed beats keyless (F-04: build
             # the order explicitly — never assume list positions).
             from jarvis.llm_compat import make_compat_providers
-            keyed = make_compat_providers()
+            keyed = make_compat_providers(data_dir=str(self.data_dir))
             if keyed:
                 # Rebuild: local → omniroute → keyed → keyless pollinations.
                 ordered: list = []
@@ -316,7 +338,9 @@ class ChatApp:
             rules=self.rules,
             llm_call=llm_call,
             tools=tools,
-            llm_off_machine=False,  # Wave 2: local only, no DCL redaction needed
+            llm_off_machine=True,  # F-11: the chain is dynamic (local Ollama ->
+            # OmniRoute -> Pollinations); redact always — harmless for local
+            # (PUBLIC/PERSONAL pass through), correct for cloud.
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
@@ -561,9 +585,9 @@ class ChatApp:
         return set(all_presets()) | {"omniroute", "telegram_bot"}
 
     def _store_key(self, provider: str, key: str) -> None:
-        """Store a key in the OS keyring. Numbered slots for multiples."""
+        """Store a key. Numbered slots for multiples."""
         from jarvis.config import Secrets
-        secrets = Secrets()
+        secrets = Secrets(data_dir=str(self.data_dir))
         base = f"{provider}_api_key"
         if secrets.get(base):
             i = 2
@@ -572,10 +596,11 @@ class ChatApp:
             secrets.set(f"{base}_{i}", key)
         else:
             secrets.set(base, key)
+        print(f"[keys] (stored via {secrets.storage_note})")
 
     def _count_keys(self, provider: str) -> int:
         from jarvis.config import Secrets
-        secrets = Secrets()
+        secrets = Secrets(data_dir=str(self.data_dir))
         base = f"{provider}_api_key"
         n = 1 if secrets.get(base) else 0
         i = 2
@@ -714,6 +739,8 @@ def main() -> None:
             print(f"  ! {p}")
         sys.exit(2)
     print("[preflight] all checks passed.")
+    for w in startup_warnings(data_dir):
+        print(f"[warn] {w}")
 
     app = ChatApp(base_dir, data_dir, enable_pc=args.pc)
     if args.voice:
