@@ -334,8 +334,22 @@ class ChatApp:
         if providers:
             chain = FallbackChain.local_first(*providers)
             llm_call = chain_as_llm_call(chain)
+            # F-08: keep the chain so the GUI pill can read last_via.
+            self._chain: "FallbackChain | None" = chain
         else:
             llm_call = make_llm_call(rules=self.rules)
+            # No providers at all: make_llm_call falls back to the honest
+            # StubLLM. The pill shows STUB so the owner knows (F-08).
+            self._chain = None
+        # Self-knowledge: who JARVIS is, what he can do. Loaded from SELF.md
+        # so he can "find himself" instead of guessing.
+        self_knowledge = ""
+        try:
+            self_md = base_dir / "SELF.md"
+            if self_md.exists():
+                self_knowledge = self_md.read_text(encoding="utf-8").strip()
+        except Exception:
+            pass
         self.brain = Brain(
             gate=self.gate,
             session_store=self.store,
@@ -345,9 +359,23 @@ class ChatApp:
             llm_off_machine=True,  # F-11: the chain is dynamic (local Ollama ->
             # OmniRoute -> Pollinations); redact always — harmless for local
             # (PUBLIC/PERSONAL pass through), correct for cloud.
+            self_knowledge=self_knowledge,
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
+
+    @property
+    def last_provider(self) -> str:
+        """F-08: which brain answered the last turn?
+
+        "stub" — no providers at all (StubLLM is answering, honest red pill).
+        "none" — chain exists but no turn has completed yet.
+        otherwise the provider name (ollama / pollinations / groq / ...).
+        """
+        chain = getattr(self, "_chain", None)
+        if chain is None:
+            return "stub"
+        return getattr(chain, "last_via", "unknown")
 
     # -- the turn ---------------------------------------------------------- #
     def turn(self, text: str) -> None:
@@ -655,8 +683,13 @@ class ChatApp:
             # /key <key>            — bot figures out the provider
             # /key <provider> <key> — explicit (overrides detection)
             # The key value is NEVER printed, logged, or stored elsewhere.
-            from jarvis.llm_compat import (
-                fingerprint_key, probe_key, PRESETS)
+            #
+            # F-12 (Option A): NO key probing. probe_key() used to spray the
+            # raw key as a Bearer token at up to 13 providers' endpoints to
+            # "identify" it — twelve strangers logging a key that isn't
+            # theirs, plus a ~100s hang. On fingerprint miss we now ask for
+            # the explicit form instead. The owner's call, per his order.
+            from jarvis.llm_compat import fingerprint_key
             rest = text[5:].strip()
             parts = rest.split(None, 1)
             pname, key = None, None
@@ -665,16 +698,14 @@ class ChatApp:
             elif len(parts) >= 1:
                 key = parts[-1].strip() if len(parts) == 2 else parts[0].strip()
                 pname = fingerprint_key(key)
-                if pname is None:
-                    print("[keys] Detecting provider…")
-                    pname = probe_key(key)
             if not key:
                 print("[keys] Use: /key <paste-your-key>")
                 return True
             if pname is None or pname not in self._key_providers():
-                print("[keys] Couldn't identify that key. Known: " +
-                      ", ".join(sorted(self._key_providers())))
-                print("[keys] Or be explicit: /key <provider> <key>")
+                print("[keys] Couldn't identify that key from its shape, "
+                      "and I won't probe providers with it (privacy).")
+                print("[keys] Known: " + ", ".join(sorted(self._key_providers())))
+                print("[keys] Be explicit: /key <provider> <key>")
                 return True
             self._store_key(pname, key)
             print(f"[keys] That's a {pname} key — stored (keyring, never shown). "

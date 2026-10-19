@@ -190,11 +190,13 @@ class Brain:
         llm_call: Callable[[List[Dict[str, Any]]], Any],
         tools: Optional[List[ToolDef]] = None,
         llm_off_machine: bool = False,
+        self_knowledge: str = "",
     ) -> None:
         self.gate = gate
         self.sessions = session_store
         self.rules = rules
         self.llm_call = llm_call
+        self._self_knowledge = self_knowledge
         self.tools: Dict[str, ToolDef] = {t.name: t for t in (tools or [])}
         # Fail closed: the model destination must be declared. Off-machine
         # calls go through DCL redaction; a missing DCL then raises instead
@@ -222,7 +224,10 @@ class Brain:
         return p1 if not p2 else f"{p1}\n\n{p2}"
 
     def _system_prompt(self) -> str:
-        lines = [self._persona, "", _MODEL_PROTOCOL, "Available tools:"]
+        lines = [self._persona, "", _MODEL_PROTOCOL]
+        if self._self_knowledge:
+            lines += ["", self._self_knowledge]
+        lines.append("Available tools:")
         for t in self.tools.values():
             req = (t.parameters or {}).get("required", [])
             lines.append(f"- {t.name}: {t.description} (required: {req})")
@@ -558,6 +563,11 @@ class FallbackChain:
             raise ValueError("FallbackChain needs at least one provider.")
         self.providers = list(providers)
         self.timeout = timeout
+        # F-08: provenance. Which provider answered the last turn?
+        # "none" until a turn succeeds; reset to "none" on total failure.
+        # The GUI pill reads this so the owner always knows which brain
+        # is talking — no more silent fallbacks.
+        self.last_via: str = "none"
 
     @classmethod
     def local_first(cls, local: Any, *cloud: Any,
@@ -578,6 +588,7 @@ class FallbackChain:
             for key_index in range(n_keys):
                 if budget is not None and not budget.allows(attempts):
                     record(provider, key_index, "skipped", "budget exhausted")
+                    self.last_via = "none"
                     return {"ok": False, "error": "budget exhausted: too many attempts",
                             "attempts": history}
                 attempts += 1
@@ -619,9 +630,11 @@ class FallbackChain:
                     break
                 else:
                     record(provider, key_index, "success", "ok")
+                    self.last_via = provider.name  # F-08: provenance
                     return {"ok": True, "reply": reply, "via": provider.name,
                             "attempts": history}
 
+        self.last_via = "none"  # F-08: total failure — provenance reset
         return {"ok": False, "error": "all providers exhausted", "attempts": history}
 
 

@@ -9,6 +9,7 @@ newer than the cache).
 from __future__ import annotations
 
 import hashlib
+import re
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
@@ -99,6 +100,27 @@ def _get_index(ctx) -> sqlite3.Connection:
     return _build_index(lib, cache)
 
 
+_STOPWORDS = frozenset("""
+a an and are as at be but by for from has have he her his i in is it its
+me my not of on or our she so that the their them they this to was we
+were will with you your each every all any some such than then there
+here when where which who whom whose what why how do does did can could
+should would may might must shall will being been over under again once
+""".split())
+
+
+def _clean_query(query: str) -> str:
+    """Strip stopwords so 'go through your database each' doesn't search
+    for the literal word 'each'. Returns the meaningful words joined for
+    FTS5, or the original query if nothing meaningful remains."""
+    words = [w for w in re.findall(r"[a-z0-9]+", query.lower())
+             if w not in _STOPWORDS and len(w) > 2]
+    if not words:
+        return query
+    # FTS5 OR query: any meaningful word matches, ranked by relevance.
+    return " OR ".join(words)
+
+
 def _search(ctx, query: str, top_k: int = 3) -> Dict[str, Any]:
     top_k = max(1, min(8, int(top_k or 3)))
     lib = _library_dir()
@@ -111,12 +133,13 @@ def _search(ctx, query: str, top_k: int = 3) -> Dict[str, Any]:
         return {"ok": False, "code": "index_failed",
                 "message": f"could not build search index: {exc}"}
     try:
+        fts_query = _clean_query(query)
         rows = con.execute(
             """SELECT path, title,
                       snippet(docs, 2, '>>>', '<<<', '…', 40) AS snip,
                       rank
                FROM docs WHERE docs MATCH ? ORDER BY rank LIMIT ?""",
-            (query, top_k)).fetchall()
+            (fts_query, top_k)).fetchall()
     except Exception:
         # FTS5 query syntax error (e.g. unbalanced quotes) — fall back
         # to a plain LIKE search rather than failing.

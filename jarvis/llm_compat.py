@@ -88,42 +88,19 @@ def fingerprint_key(key: str) -> Optional[str]:
 
 
 def probe_key(key: str, timeout: float = 15.0) -> Optional[str]:
-    """Ask each preset: is this key yours?
+    """DEPRECATED — DO NOT CALL. F-12.
 
-    Uses a minimal /chat/completions call (max_tokens=1). 200 = this
-    provider, 401/403 = not. We do NOT use /models because several
-    providers (OpenRouter, etc.) leave it public — it returns 200 for
-    ANY key, which misidentified keys (the "that's a gemini key" bug).
-    Only used when the prefix is unknown. The key is sent solely to the
-    provider endpoints it might belong to — its intended use.
+    This function sprayed the raw API key as a Bearer token at up to 13
+    providers' /chat/completions endpoints to "identify" it: twelve
+    strangers logging a key that isn't theirs, sequential, ~100s hang.
+    Per the owner's decision (Option A), /key no longer probes on
+    fingerprint miss — it asks for the explicit /key <provider> <key>
+    form instead.
+
+    Kept (neutered) for API compatibility only. Always returns None and
+    performs ZERO network calls.
     """
-    import json
-    import urllib.request
-    import urllib.error
-    key = key.strip()
-    for pname, preset in all_presets().items():
-        body = json.dumps({
-            "model": preset["model"],
-            "messages": [{"role": "user", "content": "hi"}],
-            "max_tokens": 1,
-            "stream": False,
-        }).encode("utf-8")
-        try:
-            req = urllib.request.Request(
-                f"{preset['base_url'].rstrip('/')}/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json",
-                         "Authorization": f"Bearer {key}"},
-                method="POST")
-            with urllib.request.urlopen(req, timeout=timeout):
-                return pname  # 200 — this key works here
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                continue  # key rejected — not this provider
-            # 404/429/5xx: inconclusive, keep looking
-            continue
-        except Exception:
-            continue
+    _ = (key, timeout)
     return None
 PRESETS: Dict[str, Dict[str, str]] = {
     "groq": {
@@ -316,6 +293,12 @@ class CompatProvider:
         self._call = call
         self.name = name or call.name
         self.keys = call.keys  # the chain rotates on 401/403/429
+        # The chain honors per-provider .timeout (getattr(provider,
+        # "timeout", None) or FALLBACK_TIMEOUT). Without this, keyed
+        # providers get 5s — starving slow free-tier models (550B on
+        # OpenRouter routinely exceeds 5s first-token). Same F-02 class
+        # of bug as OllamaProvider.timeout.
+        self.timeout = call.timeout
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:

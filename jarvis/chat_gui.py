@@ -27,21 +27,52 @@ import threading
 import tkinter as tk
 from tkinter import scrolledtext, simpledialog
 from pathlib import Path
+from typing import Callable
 
 
 class _GuiWriter(io.TextIOBase):
-    """stdout replacement: lines go to a queue for the UI thread."""
+    """stdout replacement: lines go to a queue for the UI thread.
 
-    def __init__(self, q: queue.Queue[str]) -> None:
+    `is_live` is a no-arg callable returning False once the turn that
+    created this writer has been abandoned (F-09): late output from the
+    orphaned worker is dropped instead of leaking into the next turn.
+    """
+
+    def __init__(self, q: queue.Queue[str],
+                 is_live: "Callable[[], bool] | None" = None) -> None:
         self._q = q
+        self._is_live = is_live or (lambda: True)
 
     def write(self, s: str) -> int:  # type: ignore[override]
-        if s:
+        if s and self._is_live():
             self._q.put(("out", s))
         return len(s)
 
     def flush(self) -> None:  # type: ignore[override]
         pass
+
+
+class TurnToken:
+    """Monotonic turn token (F-09). Pure Python, no tkinter — unit-tested.
+
+    Each turn captures a token; abandoning bumps the counter so any late
+    output from the orphaned worker thread fails `is_live()` and is
+    dropped. The brain call itself isn't interruptible (can't un-send an
+    HTTP request), so abandon = stop waiting, not stop the call.
+    """
+
+    def __init__(self) -> None:
+        self._id = 0
+
+    def new_turn(self) -> int:
+        self._id += 1
+        return self._id
+
+    def abandon(self) -> None:
+        self._id += 1
+
+    def is_live(self, token: int) -> bool:
+        return token == self._id
 
 
 class ChatWindow:
@@ -82,8 +113,21 @@ class ChatWindow:
         send = tk.Button(row, text="Send", command=self.send,
                          font=("Segoe UI", 10, "bold"))
         send.pack(side="right")
+        # F-09: STOP button. A hung turn (worst case ~90s: 6 providers x 5s
+        # x 3 ReAct rounds) used to brick the UI. Stop abandons the turn:
+        # the worker is NOT joined (the HTTP call isn't interruptible),
+        # its late output is dropped via the turn token, and the daemon
+        # thread dies with the process.
+        self.stop_btn = tk.Button(row, text="■ Stop", command=self.stop,
+                                  font=("Segoe UI", 10, "bold"),
+                                  state="disabled")
+        self.stop_btn.pack(side="right", padx=(0, 8))
         # Message view fills whatever is left.
         self.view.pack(side="top", fill="both", expand=True, padx=10, pady=8)
+        # F-09: turn token — late output from abandoned turns is dropped.
+        self._turns = TurnToken()
+        # F-08: last announced provider (for switch announcements).
+        self._last_via: str | None = None
         # Focus the entry so typing works immediately.
         self.root.after(200, lambda: self.entry.focus_set())
 
@@ -133,8 +177,9 @@ class ChatWindow:
                 elif kind == "state":
                     self._set_status(*payload)
                 elif kind == "done":
-                    self._set_status("ready", "#2e7d32")
-                    self.entry.configure(state="normal")
+                    self._on_turn_done()
+                elif kind == "abandoned":
+                    pass  # F-09: orphaned worker's epitaph — ignore it
         except queue.Empty:
             pass
         # Watchdog: the entry must NEVER be stuck disabled while the app
@@ -148,6 +193,33 @@ class ChatWindow:
         except Exception:
             pass
         self.root.after(80, self._drain)
+
+    def _on_turn_done(self) -> None:
+        """F-08: the pill shows WHICH brain answered, not just "ready".
+
+        - stub  -> red "STUB — no models!" (honest: nothing real is up)
+        - name  -> green "ready — brain: <name>"
+        Provider switches are announced once in the window.
+        """
+        via = "unknown"
+        try:
+            if self.app is not None:
+                via = self.app.last_provider
+            else:
+                return  # still warming up — attach_app owns the pill
+        except Exception:
+            pass
+        if via == "stub":
+            self._set_status("STUB — no models!", "#d32f2f")
+        elif via not in ("none", "unknown"):
+            self._set_status(f"ready — brain: {via}", "#2e7d32")
+            if self._last_via is not None and via != self._last_via:
+                self._say("sys", f"[brain] now answering via {via}\n")
+            self._last_via = via
+        else:
+            self._set_status("ready", "#2e7d32")
+        self.entry.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
 
     def _route_output(self, text: str) -> None:
         low = text.strip().lower()
@@ -189,18 +261,37 @@ class ChatWindow:
         self.entry.configure(state="disabled")
         self._say("you", "You: " + text + "\n")
         self.q.put(("state", ("thinking…", "#f9a825")))
-        self._worker = threading.Thread(target=self._run_turn, args=(text,),
-                                        daemon=True)
+        token = self._turns.new_turn()  # captured on the UI thread — no race
+        self._worker = threading.Thread(target=self._run_turn,
+                                        args=(text, token), daemon=True)
         self._worker.start()
+        self.stop_btn.configure(state="normal")
 
-    def _run_turn(self, text: str) -> None:
+    def stop(self) -> None:
+        """F-09: abandon the running turn. Never joins the worker — the
+        brain call isn't truly interruptible, so we stop WAITING, detach
+        the UI, and let the turn token drop the orphan's late output."""
+        if not (self._worker and self._worker.is_alive()):
+            return
+        self._turns.abandon()
+        self._worker = None  # orphaned; daemon thread dies with the process
+        self.entry.configure(state="normal")
+        self.stop_btn.configure(state="disabled")
+        self._set_status("ready — turn abandoned", "#f9a825")
+        self._say("sys", "[sys] Turn abandoned, sir.\n")
+        self.entry.focus_set()
+
+    def _run_turn(self, text: str, token: int) -> None:
         """Worker thread: run the brain with stdout captured."""
+        my_id = token
         if self.app is None:
             self.q.put(("out", "[sys] Still warming up — one moment, sir.\n"))
             self.q.put(("done", None))
             return
         old = sys.stdout
-        sys.stdout = _GuiWriter(self.q)  # type: ignore[assignment]
+        writer = _GuiWriter(self.q,
+                            is_live=lambda: self._turns.is_live(my_id))
+        sys.stdout = writer  # type: ignore[assignment]
         try:
             # Slash commands NEVER reach the brain (F-01: key-leak fix).
             if text.startswith("/") and self.app.handle_command(text):
@@ -210,7 +301,9 @@ class ChatWindow:
             print(f"[error] {exc}")
         finally:
             sys.stdout = old
-            self.q.put(("done", None))
+            # F-09: live turn -> done; abandoned turn -> epitaph (ignored).
+            self.q.put(("done", None)
+                       if self._turns.is_live(my_id) else ("abandoned", None))
 
     def attach_app(self, app) -> None:
         """Called on the UI thread when the background build finishes."""
