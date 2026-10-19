@@ -1,0 +1,36 @@
+"""v2 skill system public API."""
+from .registry import (
+    CAPABILITIES,
+    CapabilityDenied,
+    GateDenied,
+    PathDenied,
+    SkillContext,
+    SkillError,
+    SkillManifest,
+    SkillManifestError,
+    SkillRecord,
+    SkillRegistry,
+    ToolDef,
+    UnknownTool,
+    discover,
+    scan_skill,
+    validate_against_schema,
+)
+
+__all__ = [
+    "CAPABILITIES",
+    "CapabilityDenied",
+    "GateDenied",
+    "PathDenied",
+    "SkillContext",
+    "SkillError",
+    "SkillManifest",
+    "SkillManifestError",
+    "SkillRecord",
+    "SkillRegistry",
+    "ToolDef",
+    "UnknownTool",
+    "discover",
+    "scan_skill",
+    "validate_against_schema",
+]
