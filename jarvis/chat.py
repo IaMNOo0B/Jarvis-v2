@@ -133,9 +133,13 @@ FIRST_PARTY_SKILLS = ("echo", "notes", "clock")
 
 
 class ChatApp:
-    def __init__(self, base_dir: Path, data_dir: Path) -> None:
+    def __init__(self, base_dir: Path, data_dir: Path,
+                 enable_pc: bool = False, enable_phone: bool = False) -> None:
         self.base_dir = base_dir
         self.data_dir = data_dir
+        self._allowances = list(TURN_ALLOWANCES)
+        if enable_pc:
+            self._allowances += ["ui.read", "ui.control", "shell.exec"]
 
         from jarvis.rules import load_rules, RulesError
         from jarvis.config import Config, Field
@@ -191,6 +195,20 @@ class ChatApp:
                     "schema": tool.parameters,
                     "capabilities": list(tool.capabilities),
                 }
+        # Wave 3: PC control tools (capabilities NOT in default allowances —
+        # they need the --pc flag, explicit opt-in per run).
+        self._pc = None
+        if enable_pc:
+            from jarvis import pc_control
+            import platform
+            if platform.system() == "Windows":
+                self._pc = pc_control.PCController()
+            else:
+                print("[pc] Not Windows — PC control runs on the FAKE backend "
+                      "(structure real, no real clicks).")
+                self._pc = pc_control.PCController(
+                    backend=pc_control.FakeUiaBackend())
+            gate_registry.update(pc_control.as_gate_registry())
         self.gate = Gate(rules={}, skill_registry=gate_registry)
         self._Verdict = Verdict
 
@@ -199,14 +217,17 @@ class ChatApp:
         # risk-gate stage re-checks (defense in depth, cheap).
         def make_fn(tool_name: str):
             def fn(args: dict):
+                # PC control tools route to the PCController, not the skill pipe.
+                if tool_name.startswith("pc.") and self._pc is not None:
+                    return self._pc_call(tool_name, args)
                 ctx = SkillContext(
                     skill_name="chat",
-                    capabilities=TURN_ALLOWANCES,
+                    capabilities=self._allowances,
                     jail_dir=str(data_dir),
                     turn_id=self._turn_id,
                 )
                 def risk_gate(tn: str, tier: int, a: dict, c) -> bool:
-                    d = self.gate.check(tn, a, TURN_ALLOWANCES)
+                    d = self.gate.check(tn, a, self._allowances)
                     return d.verdict in (Verdict.ALLOW, Verdict.ALLOW_WITH_UNDO)
                 result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
                 if not result.get("ok"):
@@ -216,11 +237,16 @@ class ChatApp:
             return fn
 
         tools = []
+        pc_descs = {}
+        if self._pc is not None:
+            from jarvis import pc_control
+            pc_descs = {t["name"]: t["description"]
+                        for t in pc_control.tool_definitions()}
         for n, info in gate_registry.items():
             desc = next(
                 (t.description for rec in self.registry._records.values()
                  if rec.manifest for t in rec.manifest.tools if t.name == n),
-                n,
+                pc_descs.get(n, n),
             )
             tools.append(ToolDef(name=n, description=desc,
                                  parameters=info["schema"], fn=make_fn(n)))
@@ -243,7 +269,7 @@ class ChatApp:
         self._turn_id += 1
         print("[thinking]")
         try:
-            result = self.brain.respond(self.session_id, text, TURN_ALLOWANCES)
+            result = self.brain.respond(self.session_id, text, self._allowances)
         except Exception as exc:
             print(f"[error] Brain failed honestly: {exc}")
             traceback.print_exc()
@@ -295,18 +321,70 @@ class ChatApp:
         }.get(result.status, f"[{result.status}]")
         print(f"{state} {result.text}")
 
+    def _pc_call(self, tool_name: str, args: dict):
+        """Route pc.* tools to the PCController. Tier-3 (pc.shell) never
+        reaches here — the brain returns approval_required first."""
+        op = tool_name[3:]
+        if op == "observe":
+            snap = self._pc.observe(window=args.get("window"))
+            return {"elements": len(snap.elements)}
+        if op == "screenshot":
+            data = self._pc.screenshot(region=args.get("region"))
+            return {"bytes": len(data), "note": "RAM only, never disk"}
+        if op == "click":
+            return self._pc.click_element(args["element_id"])
+        if op == "type":
+            return self._pc.type_into_field(args["element_id"], args.get("text", ""))
+        if op == "key":
+            return self._pc.press_key(args.get("key", ""))
+        raise RuntimeError(f"unknown pc op: {op}")
+
     def _executor(self, tool_name: str, args: dict):
         from jarvis.skills.registry import SkillContext
         ctx = SkillContext(
-            skill_name="chat", capabilities=TURN_ALLOWANCES,
+            skill_name="chat", capabilities=self._allowances,
             jail_dir=str(self.data_dir), turn_id=self._turn_id)
         def risk_gate(tn, tier, a, c) -> bool:
-            d = self.gate.check(tn, a, TURN_ALLOWANCES)
+            d = self.gate.check(tn, a, self._allowances)
             return d.verdict in (self._Verdict.ALLOW, self._Verdict.ALLOW_WITH_UNDO)
         result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
         if not result.get("ok"):
             raise RuntimeError(f"{result.get('code')}: {result.get('message')}")
         return result["result"]
+
+    def start_phone(self) -> None:
+        """Wave 3: Telegram remote. Token from keyring/env, never a file."""
+        from jarvis import phone as phone_mod
+        from jarvis.config import Secrets
+        secrets = Secrets()
+        token = secrets.get("telegram_bot_token", "")
+        if not token:
+            print("[phone] No bot token. Set it in Settings (phone tab) first, sir.")
+            print("[phone] Get one from @BotFather on Telegram — 30 seconds.")
+            return
+        user_id = self.config.get("phone.allowed_user_id", 0) if hasattr(
+            self.config, "get") else 0
+
+        def brain_fn(text: str, uid: int) -> str:
+            sid = self.store.create_session("owais", "phone")
+            res = self.brain.respond(sid, text, ["fs.read", "time.read"])
+            return str(res)
+
+        remote = phone_mod.PhoneRemote(
+            brain_fn=brain_fn, gate=self.gate,
+            allowed_user_id=user_id or None,
+            token=token, executor=self._executor,
+            on_alert=lambda m: print(f"[phone alert] {m}"))
+        print("[phone] Pair from Telegram: the PC will show a 6-digit code.")
+        print("[phone] Press Ctrl+C to stop.")
+        import time
+        try:
+            while True:
+                remote.poll_once()
+                time.sleep(2)
+        except KeyboardInterrupt:
+            remote.stop()
+            print("\n[phone] Stopped.")
 
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:
@@ -357,6 +435,10 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="JARVIS v2 Wave-1 text chat")
     ap.add_argument("--data-dir", default=None,
                     help="data directory (default: ./data)")
+    ap.add_argument("--pc", action="store_true",
+                    help="enable PC control tools (explicit opt-in)")
+    ap.add_argument("--phone", action="store_true",
+                    help="start Telegram phone remote instead of chat")
     args = ap.parse_args()
     base_dir = Path(__file__).resolve().parent.parent
     data_dir = Path(args.data_dir) if args.data_dir else base_dir / "data"
@@ -369,8 +451,11 @@ def main() -> None:
         sys.exit(2)
     print("[preflight] all checks passed.")
 
-    app = ChatApp(base_dir, data_dir)
-    app.run()
+    app = ChatApp(base_dir, data_dir, enable_pc=args.pc)
+    if args.phone:
+        app.start_phone()
+    else:
+        app.run()
 
 
 if __name__ == "__main__":
