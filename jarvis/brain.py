@@ -563,8 +563,13 @@ class FallbackChain:
                             "attempts": history}
                 attempts += 1
                 try:
+                    # Per-provider timeout: local models need minutes on
+                    # cold start; cloud APIs need seconds. The chain default
+                    # (5s) must never starve a local provider (F-02).
+                    p_timeout = getattr(provider, "timeout",
+                                        None) or self.timeout
                     reply = provider.respond(message, key_index=key_index,
-                                             timeout=self.timeout)
+                                             timeout=p_timeout)
                 except ProviderHTTPError as exc:
                     if exc.status in ROTATE_KEY_HTTP and key_index + 1 < n_keys:
                         record(provider, key_index, "key_rotated",
@@ -576,9 +581,14 @@ class FallbackChain:
                         break  # next provider; a new key won't fix a dead host
                     record(provider, key_index, "terminal",
                            f"HTTP {exc.status}: not retryable")
-                    return {"ok": False,
-                            "error": f"HTTP {exc.status} from {provider.name}: not retryable",
-                            "attempts": history}
+                    if exc.status == 400:
+                        # Malformed request — retrying elsewhere won't help.
+                        return {"ok": False,
+                                "error": f"HTTP {exc.status} from {provider.name}: not retryable",
+                                "attempts": history}
+                    # 401/403 with keys exhausted: one dead key must never
+                    # kill the chain — try the next provider (F-03).
+                    break
                 except TRANSIENT_TRANSPORT as exc:
                     # Timeouts, DNS, connection drops: the failures v1 skipped.
                     record(provider, key_index, "fallback",

@@ -284,6 +284,9 @@ class OllamaProvider:
         self._call = call
         self.name = name
         self.keys: List[str] = []  # local model: no API keys, nothing to rotate
+        # Cold model load on a 2060 can take 15-60s; the chain must not
+        # starve it with the 5s cloud default (F-02).
+        self.timeout = 120.0
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:

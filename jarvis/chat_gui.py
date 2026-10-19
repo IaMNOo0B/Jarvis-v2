@@ -86,11 +86,20 @@ class ChatWindow:
         self.root.after(200, lambda: self.entry.focus_set())
 
         # Approval answers from a Tk modal (the _gui_input_fn hook).
-        app._gui_input_fn = self._ask_approval
+        if app is not None:
+            app._gui_input_fn = self._ask_approval
+        self.app = app
 
         self._worker: threading.Thread | None = None
         self._drain()
-        self._say("sys", "JARVIS online — text chat ready, sir.\n")
+        if app is None:
+            # F-06: brain still warming up in background — window is already
+            # visible, entry disabled until the app attaches.
+            self._set_status("warming up…", "#f9a825")
+            self._say("sys", "Warming up the brain — one moment, sir.\n")
+            self.entry.configure(state="disabled")
+        else:
+            self._say("sys", "JARVIS online — text chat ready, sir.\n")
 
     # -- UI helpers (UI thread only) ------------------------------------ #
     def _clear_placeholder(self, _event=None) -> None:
@@ -174,15 +183,31 @@ class ChatWindow:
 
     def _run_turn(self, text: str) -> None:
         """Worker thread: run the brain with stdout captured."""
+        if self.app is None:
+            self.q.put(("out", "[sys] Still warming up — one moment, sir.\n"))
+            self.q.put(("done", None))
+            return
         old = sys.stdout
         sys.stdout = _GuiWriter(self.q)  # type: ignore[assignment]
         try:
+            # Slash commands NEVER reach the brain (F-01: key-leak fix).
+            if text.startswith("/") and self.app.handle_command(text):
+                return
             self.app.turn(text)
         except Exception as exc:  # never kill the window on a brain error
             print(f"[error] {exc}")
         finally:
             sys.stdout = old
             self.q.put(("done", None))
+
+    def attach_app(self, app) -> None:
+        """Called on the UI thread when the background build finishes."""
+        self.app = app
+        app._gui_input_fn = self._ask_approval
+        self._set_status("ready", "#2e7d32")
+        self._say("sys", "JARVIS online — text chat ready, sir.\n")
+        self.entry.configure(state="normal")
+        self.entry.focus_set()
 
     def run(self) -> None:
         self.root.mainloop()
@@ -204,6 +229,37 @@ def main() -> None:
         sys.exit(2)
     app = ChatApp(base_dir, data_dir)
     ChatWindow(app).run()
+
+
+def main() -> None:
+    base_dir = Path(__file__).resolve().parent.parent
+    data_dir = base_dir / "data"
+    # Reuse the CLI's preflight + ChatApp wiring.
+    from jarvis.chat import preflight, ChatApp
+    problems = preflight(base_dir, data_dir)
+    if problems:
+        # No terminal here — show the problems in a dialog and exit.
+        root = tk.Tk()
+        root.withdraw()
+        tk.messagebox.showerror(
+            "JARVIS — cannot start",
+            "Preflight failed:\n\n" + "\n".join("• " + p for p in problems))
+        sys.exit(2)
+    # F-06: build the brain OFF the UI thread. The window appears instantly
+    # with "warming up…"; the app attaches when its health probes finish.
+    window = ChatWindow(None)
+
+    def build() -> None:
+        try:
+            app = ChatApp(base_dir, data_dir)
+        except Exception as exc:  # startup failed — say so in the window
+            window.q.put(("out", f"[error] Startup failed: {exc}\n"))
+            window.q.put(("state", ("startup failed", "#d32f2f")))
+            return
+        window.root.after(0, lambda: window.attach_app(app))
+
+    threading.Thread(target=build, daemon=True).start()
+    window.run()
 
 
 if __name__ == "__main__":

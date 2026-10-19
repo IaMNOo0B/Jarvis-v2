@@ -286,12 +286,23 @@ class ChatApp:
             pass
         try:
             # The owner's key vault: every stored key becomes a provider,
-            # with per-provider rotation. Keyed beats keyless.
+            # with per-provider rotation. Keyed beats keyless (F-04: build
+            # the order explicitly — never assume list positions).
             from jarvis.llm_compat import make_compat_providers
             keyed = make_compat_providers()
-            # Insert keyed providers before the keyless one.
             if keyed:
-                providers[-1:] = keyed + providers[-1:]
+                # Rebuild: local → omniroute → keyed → keyless pollinations.
+                ordered: list = []
+                keyless = None
+                for p in providers:
+                    if getattr(p, "name", "") == "pollinations":
+                        keyless = p
+                    else:
+                        ordered.append(p)
+                ordered.extend(keyed)
+                if keyless is not None:
+                    ordered.append(keyless)
+                providers = ordered
         except Exception:
             pass
         if providers:
@@ -573,6 +584,96 @@ class ChatApp:
             i += 1
         return n
 
+    # -- slash commands (shared by CLI and GUI) --------------------------- #
+    def handle_command(self, text: str) -> bool:
+        """Handle /commands. Returns True if text was a command (so the
+        caller must NOT send it to the brain). The GUI and CLI both call
+        this — a /key pasted in the window can never reach the brain."""
+        if text == "/quit":
+            print("[stopped] Session saved. Goodbye, sir.")
+            return True
+        if text == "/help":
+            print("Commands: /quit, /session (show session id), "
+                  "/skills (list), /memory <fact> (remember), /recall <q>, "
+                  "/key <paste-your-key> (store API key), /keys (list), "
+                  "/provider <name> <url> <model> (add company)")
+            return True
+        if text == "/session":
+            print(f"[session] {self.session_id}")
+            return True
+        if text == "/skills":
+            for name, rec in self.registry._records.items():
+                q = "" if rec.approved else " [quarantined]"
+                print(f"  - {name}{q}")
+            return True
+        if text.startswith("/memory "):
+            fact = text[8:].strip()
+            if "=" in fact:
+                k, v = fact.split("=", 1)
+                self.memory.write_fact(k.strip(), v.strip(), source="cli",
+                                       tier="user", confidence=1.0)
+                print(f"[memory] Remembered: {k.strip()}")
+            else:
+                print("[memory] Use: /memory key = value")
+            return True
+        if text.startswith("/recall "):
+            for hit in self.memory.recall(text[8:].strip())[:5]:
+                flag = " [quarantined]" if hit.get("quarantined") else ""
+                print(f"  - {hit.get('snippet', '')[:120]}{flag}")
+            return True
+        if text.startswith("/key "):
+            # /key <key>            — bot figures out the provider
+            # /key <provider> <key> — explicit (overrides detection)
+            # The key value is NEVER printed, logged, or stored elsewhere.
+            from jarvis.llm_compat import (
+                fingerprint_key, probe_key, PRESETS)
+            rest = text[5:].strip()
+            parts = rest.split(None, 1)
+            pname, key = None, None
+            if len(parts) == 2 and parts[0].lower() in self._key_providers():
+                pname, key = parts[0].lower(), parts[1].strip()
+            elif len(parts) >= 1:
+                key = parts[-1].strip() if len(parts) == 2 else parts[0].strip()
+                pname = fingerprint_key(key)
+                if pname is None:
+                    print("[keys] Detecting provider…")
+                    pname = probe_key(key)
+            if not key:
+                print("[keys] Use: /key <paste-your-key>")
+                return True
+            if pname is None or pname not in self._key_providers():
+                print("[keys] Couldn't identify that key. Known: " +
+                      ", ".join(sorted(self._key_providers())))
+                print("[keys] Or be explicit: /key <provider> <key>")
+                return True
+            self._store_key(pname, key)
+            print(f"[keys] That's a {pname} key — stored (keyring, never shown). "
+                  f"Restart JARVIS to use it, sir.")
+            return True
+        if text == "/keys":
+            for pname in sorted(self._key_providers()):
+                n = self._count_keys(pname)
+                mark = f"{n} key(s)" if n else "no key"
+                print(f"  - {pname}: {mark}")
+            return True
+        if text.startswith("/provider "):
+            # /provider <name> <base_url> <model> — register any
+            # OpenAI-compatible API (any company).
+            from jarvis.llm_compat import add_custom_provider
+            parts = text[10:].strip().split(None, 2)
+            if len(parts) != 3:
+                print("[keys] Use: /provider <name> <base_url> <model>")
+                print("[keys] Example: /provider myco https://api.myco.ai/v1 my-model")
+                return True
+            try:
+                add_custom_provider(*parts)
+                print(f"[keys] Provider '{parts[0].lower()}' registered. "
+                      f"Now paste its key: /key {parts[0].lower()} <key>")
+            except ValueError as exc:
+                print(f"[keys] {exc}")
+            return True
+        return False
+
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:
         print("JARVIS v2 — Wave 1 text chat. Type /help. Ctrl+C saves and exits.")
@@ -586,86 +687,8 @@ class ChatApp:
             if not text:
                 continue
             if text == "/quit":
-                print("[stopped] Session saved. Goodbye, sir.")
                 break
-            if text == "/help":
-                print("Commands: /quit, /session (show session id), "
-                      "/skills (list), /memory <fact> (remember), /recall <q>, "
-                      "/key <provider> <key> (store API key), /keys (list providers)")
-                continue
-            if text == "/session":
-                print(f"[session] {self.session_id}")
-                continue
-            if text == "/skills":
-                for name, rec in self.registry._records.items():
-                    q = "" if rec.approved else " [quarantined]"
-                    print(f"  - {name}{q}")
-                continue
-            if text.startswith("/memory "):
-                fact = text[8:].strip()
-                if "=" in fact:
-                    k, v = fact.split("=", 1)
-                    self.memory.write_fact(k.strip(), v.strip(), source="cli",
-                                           tier="user", confidence=1.0)
-                    print(f"[memory] Remembered: {k.strip()}")
-                else:
-                    print("[memory] Use: /memory key = value")
-                continue
-            if text.startswith("/recall "):
-                for hit in self.memory.recall(text[8:].strip())[:5]:
-                    flag = " [quarantined]" if hit.get("quarantined") else ""
-                    print(f"  - {hit.get('snippet', '')[:120]}{flag}")
-                continue
-            if text.startswith("/key "):
-                # /key <key>            — bot figures out the provider
-                # /key <provider> <key> — explicit (overrides detection)
-                # The key value is NEVER printed, logged, or stored elsewhere.
-                from jarvis.llm_compat import (
-                    fingerprint_key, probe_key, PRESETS)
-                rest = text[5:].strip()
-                parts = rest.split(None, 1)
-                pname, key = None, None
-                if len(parts) == 2 and parts[0].lower() in self._key_providers():
-                    pname, key = parts[0].lower(), parts[1].strip()
-                elif len(parts) >= 1:
-                    key = parts[-1].strip() if len(parts) == 2 else parts[0].strip()
-                    pname = fingerprint_key(key)
-                    if pname is None:
-                        print("[keys] Detecting provider…")
-                        pname = probe_key(key)
-                if not key:
-                    print("[keys] Use: /key <paste-your-key>")
-                    continue
-                if pname is None or pname not in self._key_providers():
-                    print("[keys] Couldn't identify that key. Known: " +
-                          ", ".join(sorted(self._key_providers())))
-                    print("[keys] Or be explicit: /key <provider> <key>")
-                    continue
-                self._store_key(pname, key)
-                print(f"[keys] That's a {pname} key — stored (keyring, never shown). "
-                      f"Restart JARVIS to use it, sir.")
-                continue
-            if text == "/keys":
-                for pname in sorted(self._key_providers()):
-                    n = self._count_keys(pname)
-                    mark = f"{n} key(s)" if n else "no key"
-                    print(f"  - {pname}: {mark}")
-                continue
-            if text.startswith("/provider "):
-                # /provider <name> <base_url> <model> — register any
-                # OpenAI-compatible API (any company).
-                from jarvis.llm_compat import add_custom_provider
-                parts = text[10:].strip().split(None, 2)
-                if len(parts) != 3:
-                    print("[keys] Use: /provider <name> <base_url> <model>")
-                    print("[keys] Example: /provider myco https://api.myco.ai/v1 my-model")
-                    continue
-                try:
-                    add_custom_provider(*parts)
-                    print(f"[keys] Provider '{parts[0].lower()}' registered. "
-                          f"Now paste its key: /key {parts[0].lower()} <key>")
-                except ValueError as exc:
-                    print(f"[keys] {exc}")
+            if self.handle_command(text):
                 continue
             self.turn(text)
 
