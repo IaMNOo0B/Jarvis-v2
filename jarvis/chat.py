@@ -1195,27 +1195,6 @@ class ChatApp:
 
     def turn(self, text: str) -> None:
         self._turn_id += 1
-        # Common social turns should not enter the tool planner. This also
-        # keeps a broken provider from turning "how are you?" into a finance task.
-        simple_reply = _simple_chat_reply(text)
-        if simple_reply is not None:
-            reply = simple_reply
-            user_event = None
-            try:
-                user_event = self.store.emit(
-                    self.session_id, "user.message", {"text": text},
-                    actor="user", trust="user")
-            except Exception:
-                pass
-            try:
-                self.store.emit(
-                    self.session_id, "brain.reply", {"text": reply},
-                    actor="brain", trust="user",
-                    causal_parent=user_event)
-            except Exception:
-                pass
-            print(f"[answered] {reply}")
-            return
         # Idle self-evolution review (Ext-7): once a day, when the user
         # has been idle long enough, JARVIS reviews itself — foundry
         # scan, yesterday's diary, memory consolidation. The guard is
@@ -1271,7 +1250,9 @@ class ChatApp:
             self.brain._learned_context = store.format_for_prompt(pairs)
         except Exception:
             self.brain._learned_context = ""
-        print("[thinking]")
+        simple_reply = _simple_chat_reply(text)
+        if simple_reply is None:
+            print("[thinking]")
         # CapNet outcome watermark: events with seq beyond this belong
         # to THIS turn; _record_turn_outcomes reads them back at the
         # end of the turn for the network's feedback loop.
@@ -1281,31 +1262,48 @@ class ChatApp:
             turn_mark = _prior[-1]["seq"] if _prior else 0
         except Exception:
             turn_mark = None
-        result = None
-        try:
-            result = self._route_turn(text)
-        except Exception:
-            result = None  # the intent tier must never break a turn
-        if result is None:
-            # Capability-network tier: deterministic intents already
-            # had their chance above and still win; the network routes
-            # only unambiguous, named, tier-1 tasks (see
-            # _capnet_dispatchable) and merely records its plan for
-            # everything else.
+
+        if simple_reply is not None:
+            # Social turns bypass inference, but still participate in the
+            # normal event, audit, digest, and learning lifecycle.
+            from jarvis.brain import TurnResult
+            user_ev = None
             try:
-                result = self._capnet_route_turn(text)
-            except Exception:
-                result = None  # the network tier must never break a turn
-        brain_used = result is None
-        if result is None:
-            try:
-                result = self.brain.respond(self.session_id, text,
-                                            self._allowances)
+                user_ev = self.store.emit(
+                    self.session_id, "user.message", {"text": text},
+                    actor="user", trust="user")
+                self.store.emit(
+                    self.session_id, "brain.reply", {"text": simple_reply},
+                    actor="brain", trust="user", causal_parent=user_ev)
             except Exception as exc:
-                print(f"[error] Brain failed honestly: {exc}")
-                traceback.print_exc()
-                self._flush_routine_events()
-                return
+                print(f"[warn] Could not persist simple chat turn: {exc}")
+            result = TurnResult(status="answered", text=simple_reply)
+            brain_used = False
+        else:
+            result = None
+            try:
+                result = self._route_turn(text)
+            except Exception:
+                result = None  # the intent tier must never break a turn
+            if result is None:
+                # Capability-network tier: deterministic intents already
+                # had their chance above and still win; the network routes
+                # only unambiguous, named, tier-1 tasks and merely records
+                # its plan for everything else.
+                try:
+                    result = self._capnet_route_turn(text)
+                except Exception:
+                    result = None  # the network tier must never break a turn
+            brain_used = result is None
+            if result is None:
+                try:
+                    result = self.brain.respond(self.session_id, text,
+                                                self._allowances)
+                except Exception as exc:
+                    print(f"[error] Brain failed honestly: {exc}")
+                    traceback.print_exc()
+                    self._flush_routine_events()
+                    return
         if result.status == "approval_required":
             req = result.approval_request or {}
             gate_req = req.get("request", {}) or {}
