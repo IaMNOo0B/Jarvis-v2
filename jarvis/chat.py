@@ -431,7 +431,7 @@ class ChatApp:
             if approved:
                 decision, out = self.gate.execute_approved(
                     gate_req.get("token", ""), req.get("tool", ""),
-                    req.get("args", {}), executor=self._executor)
+                    req.get("args", {}), executor=self._executor_approved)
                 print(f"[approved] {decision.reason}")
                 if out:
                     print(out[:500])
@@ -461,6 +461,9 @@ class ChatApp:
             return self._pc.type_into_field(args["element_id"], args.get("text", ""))
         if op == "key":
             return self._pc.press_key(args.get("key", ""))
+        if op == "shell":
+            # This path is reached only after the Gate's tier-3 approval.
+            return self._pc.run_in_terminal(args["command"])
         raise RuntimeError(f"unknown pc op: {op}")
 
     def _executor(self, tool_name: str, args: dict):
@@ -474,6 +477,35 @@ class ChatApp:
         result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
         if not result.get("ok"):
             raise RuntimeError(f"{result.get('code')}: {result.get('message')}")
+        return result["result"]
+
+    def _executor_approved(self, tool_name: str, args: dict):
+        """Execute only after Gate.execute_approved has verified its token.
+
+        The normal registry risk gate would ask for tier-3 approval again,
+        making approved code_run actions impossible. This callback is only
+        supplied to execute_approved, which validates the exact tool, schema,
+        and action-bound token before calling it.
+        """
+        if tool_name.startswith("pc.") and self._pc is not None:
+            return self._pc_call(tool_name, args)
+
+        from jarvis.skills.registry import SkillContext
+        ctx = SkillContext(
+            skill_name="chat", capabilities=self._allowances,
+            jail_dir=str(self.data_dir), turn_id=self._turn_id)
+
+        def risk_gate(tn: str, tier: int, candidate: dict, _ctx) -> bool:
+            if tn == tool_name and tier == 3 and candidate == args:
+                return True
+            decision = self.gate.check(tn, candidate, self._allowances)
+            return decision.verdict in (
+                self._Verdict.ALLOW, self._Verdict.ALLOW_WITH_UNDO)
+
+        result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"{result.get('code')}: {result.get('message')}")
         return result["result"]
 
     def start_phone(self) -> None:
