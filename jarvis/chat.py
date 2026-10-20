@@ -194,7 +194,11 @@ class ChatApp:
             "brain": {
                 "max_rounds": Field(int, 5, min=1, max=10),
                 "max_tool_calls": Field(int, 12, min=1, max=50),
+                "self_critique": Field(bool, True),
                 "omniroute_model": Field(str, "google/gemini-2.5-flash"),
+            },
+            "learning": {
+                "enabled": Field(bool, True),
             },
             "data_retention_days": Field(int, 365),
         }
@@ -372,6 +376,9 @@ class ChatApp:
             self_knowledge=self_knowledge,
             max_rounds=self.config.get("brain.max_rounds", 5),
             max_tool_calls=self.config.get("brain.max_tool_calls", 12),
+            self_critique=self.config.get("brain.self_critique", True),
+            memory=self.memory,
+            auto_learn=self.config.get("learning.enabled", True),
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
