@@ -60,6 +60,7 @@ _FALLBACK_SECRET_RX = [
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),                 # AWS access key
     re.compile(r"\bxai-[A-Za-z0-9]{20,}\b"),             # xAI
     re.compile(r"\bAIza[A-Za-z0-9_\-]{20,}\b"),          # Google API key
+    re.compile(r"\bAQ\.[A-Za-z0-9_\-]{40,}\b"),          # Google AI Studio key (2025+)
 ]
 
 # The only Tier C (PII) shapes precise enough for the speech path.

@@ -375,8 +375,13 @@ def _validate_nvidia_key(v: str) -> bool:
 
 
 def _validate_gemini_key(v: str) -> bool:
-    return (v.startswith("AIza") and len(v) == 39
-            and _TOKEN_CHARS_RE.fullmatch(v[4:]) is not None)
+    # Classic AI Studio shape: AIza + 35 (= 39 total).
+    if (v.startswith("AIza") and len(v) == 39
+            and _TOKEN_CHARS_RE.fullmatch(v[4:]) is not None):
+        return True
+    # Current AI Studio shape (2025+): "AQ." + a long opaque body.
+    return (v.startswith("AQ.") and len(v) >= 40
+            and _TOKEN_CHARS_RE.fullmatch(v[3:]) is not None)
 
 
 def _validate_perplexity_key(v: str) -> bool:
@@ -403,7 +408,8 @@ _PROVIDER_KEY_RECOGNIZERS: list[tuple[str, re.Pattern,
     ("provider-key-nvidia",
      re.compile(r"\bnvapi-[A-Za-z0-9_\-]{8,}"), _validate_nvidia_key),
     ("provider-key-gemini",
-     re.compile(r"\bAIza[A-Za-z0-9_\-]{8,}"), _validate_gemini_key),
+     re.compile(r"\b(?:AIza[A-Za-z0-9_\-]{8,}|AQ\.[A-Za-z0-9_\-]{8,})"),
+     _validate_gemini_key),
     ("provider-key-perplexity",
      re.compile(r"\bpplx-[A-Za-z0-9_\-]{8,}"), _validate_perplexity_key),
     ("provider-key-xai",

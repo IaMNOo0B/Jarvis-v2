@@ -84,6 +84,11 @@ def fingerprint_key(key: str) -> Optional[str]:
     for prefix, provider in KEY_PREFIXES.items():
         if k.startswith(prefix):
             return provider
+    # Google AI Studio's current key format (2025+): "AQ." + a long
+    # opaque body (~50 chars). Length-guarded so a stray short "AQ."
+    # string is never claimed as a key.
+    if k.startswith("AQ.") and len(k) >= 40:
+        return "gemini"
     return None
 
 
