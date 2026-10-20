@@ -20,6 +20,7 @@ from jarvis.brain import (
     Brain,
     BrainLLMError,
     ChainBudget,
+    _args_fingerprint,
     FallbackChain,
     ProviderHTTPError,
     RulesError,
@@ -428,6 +429,17 @@ def test_retrying_one_of_multiple_failed_actions_does_not_clear_the_other():
     assert result.status == "stopped"
     assert "second.txt" in result.text
     assert "saved successfully" not in result.text
+
+
+def test_action_fingerprint_is_stable_and_does_not_retain_raw_values():
+    first = _args_fingerprint({"path": "secret-folder/file.txt", "mode": "write"})
+    reordered = _args_fingerprint({"mode": "write", "path": "secret-folder/file.txt"})
+    different = _args_fingerprint({"path": "other.txt", "mode": "write"})
+
+    assert first == reordered
+    assert first != different
+    assert "secret-folder" not in first
+    assert len(first) == 64
 
 
 def test_max_tool_calls_cap():
