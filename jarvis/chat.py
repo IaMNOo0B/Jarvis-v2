@@ -295,6 +295,7 @@ class ChatApp:
         from jarvis.brain import FallbackChain, chain_as_llm_call
         from jarvis.llm_ollama import make_llm_call, OllamaProvider, OllamaCall
         ollama_provider = None
+        self._ollama_status = "Ollama has not been checked yet."
         ollama_model = self.config.get(
             "brain.ollama_model", "qwen2.5:7b-instruct-q4_K_M")
         ollama_base_url = self.config.get(
@@ -303,11 +304,13 @@ class ChatApp:
             ollama_call = OllamaCall(
                 base_url=ollama_base_url, model=ollama_model, rules=self.rules)
             ok, ollama_status = ollama_call.check_health()
+            self._ollama_status = ollama_status
             print(f"[llm] {ollama_status}")
             if ok:
                 ollama_provider = OllamaProvider(ollama_call)
         except Exception as exc:
-            print(f"[llm] Ollama check failed: {exc}")
+            self._ollama_status = f"Ollama check failed: {exc}"
+            print(f"[llm] {self._ollama_status}")
         omni_provider = None
         try:
             from jarvis.llm_omniroute import make_omniroute_call, OmniRouteProvider
@@ -391,6 +394,29 @@ class ChatApp:
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
 
+    def status_report(self) -> str:
+        """Return a truthful local status report without exposing secrets."""
+        chain = getattr(self, "_chain", None)
+        providers = [getattr(p, "name", "unknown")
+                     for p in getattr(chain, "providers", [])]
+        if not providers:
+            providers = ["stub (no real provider connected)"]
+        learned_dir = self.data_dir / "learned"
+        try:
+            learned_count = sum(1 for p in learned_dir.glob("*.md") if p.is_file())
+        except Exception:
+            learned_count = 0
+        return "\n".join([
+            "JARVIS status:",
+            f"- Last response provider: {self.last_provider}",
+            f"- Available providers: {', '.join(providers)}",
+            f"- Ollama: {getattr(self, '_ollama_status', 'not checked')}",
+            f"- Local episodic learning: {'on' if self.config.get('learning.enabled', True) else 'off'}",
+            f"- Self-critique: {'on' if self.config.get('brain.self_critique', True) else 'off'}",
+            f"- Saved web-learning notes: {learned_count}",
+            "- Internet research tools: web_search, web_fetch, web_learn, learning_search",
+        ])
+
     @property
     def last_provider(self) -> str:
         """F-08: which brain answered the last turn?
@@ -406,6 +432,9 @@ class ChatApp:
 
     # -- the turn ---------------------------------------------------------- #
     def turn(self, text: str) -> None:
+        if text.strip().lower() == "/status":
+            print(self.status_report())
+            return
         self._turn_id += 1
         print("[thinking]")
         try:
