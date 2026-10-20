@@ -108,6 +108,10 @@ def test_web_manifest_exposes_learning_tools_with_least_privilege():
     assert set(tools["web_learn"]["capabilities"]) == {
         "net.outbound", "fs.write"
     }
+    assert set(manifest["capabilities"]) == {"net.outbound", "fs.read", "fs.write"}
+    from jarvis.skills import scan_skill
+    findings = scan_skill(manifest_path.parent)
+    assert not [f for f in findings if f["rule"] == "capability-mismatch"]
 
 def test_web_fetch_blocks_local_and_private_network_targets(monkeypatch):
     assert web_skill._validate_public_url("http://localhost/admin")[0] is False
