@@ -35,6 +35,7 @@ Integrated against the real sibling components:
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import json
 import re
@@ -53,6 +54,12 @@ MAX_CONSECUTIVE_FAILURES = 2   # 2-attempt rule: 2 failed tool attempts -> hones
 TOKEN_BUDGET = 4000     # 4k-physical strategy (brain-spec §5)
 FALLBACK_TIMEOUT = 5.0  # seconds; no blocking network beyond this in failure paths
 MAX_TOOL_OUTPUT_CHARS = 8000  # bound untrusted tool data before it enters model context
+
+
+def _args_fingerprint(args: Dict[str, Any]) -> str:
+    """Stable action identity without retaining raw argument values in memory."""
+    canonical = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -639,9 +646,7 @@ class Brain:
                         f"{getattr(decision, 'reason', 'not allowed')}"
                     )
                     last_failed_tool_name = name
-                    last_failed_tool_args = json.dumps(
-                        args, sort_keys=True, ensure_ascii=False, default=str
-                    )
+                    last_failed_tool_args = _args_fingerprint(args)
                     unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     # The denied action did not run. Keep the denial unresolved;
                     # an unrelated successful tool must not imply it worked.
@@ -701,9 +706,7 @@ class Brain:
                     last_parent = call_ev
                     last_action_issue = f"tool '{name}' is not registered"
                     last_failed_tool_name = name
-                    last_failed_tool_args = json.dumps(
-                        args, sort_keys=True, ensure_ascii=False, default=str
-                    )
+                    last_failed_tool_args = _args_fingerprint(args)
                     unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
@@ -754,9 +757,7 @@ class Brain:
                     consecutive_failures += 1
                     last_action_issue = f"tool '{name}' failed: {content[:300]}"
                     last_failed_tool_name = name
-                    last_failed_tool_args = json.dumps(
-                        args, sort_keys=True, ensure_ascii=False, default=str
-                    )
+                    last_failed_tool_args = _args_fingerprint(args)
                     unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     messages.append({"role": "tool", "name": name, "content": content})
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
@@ -769,9 +770,7 @@ class Brain:
                 consecutive_failures = 0
                 # A successful unrelated tool does not erase a previous failure.
                 # Clear it only when the same failed tool later succeeds.
-                current_tool_args = json.dumps(
-                    args, sort_keys=True, ensure_ascii=False, default=str
-                )
+                current_tool_args = _args_fingerprint(args)
                 # Any exact action that succeeds resolves only its own failure.
                 # Do not require it to be the most recently failed action.
                 unresolved_actions.pop((name, current_tool_args), None)
