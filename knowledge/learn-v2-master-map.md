@@ -250,11 +250,11 @@ Which spec must be built before which. The DAG, with reasons:
 
 ---
 
-## 6. What's NOT Yet Specified
+## 6. What's Not Yet Specified or Implemented
 
-Honest list — subsystems with no spec:
+This section is a mixed list: some items lack a design spec, while others have a spec but remain unimplemented.
 
-1. **Chat UI implementation** — `learn-chat-ui-spec.md` was added after this master map was written. The spec defines the message list, input, state indicators, activity feed, approval rendering, accessibility, and Tauri 2 + React architecture. The repository still has a Tkinter GUI and no Tauri/React frontend, so implementation and the architecture decision remain open.
+1. **Chat UI implementation** — `learn-chat-ui-spec.md` defines the message list, input, state indicators, activity feed, approval rendering, accessibility, and Tauri 2 + React architecture. The repository still has a Tkinter GUI and no Tauri/React frontend, so implementation and the architecture decision remain open. This is an implementation gap, not a missing-spec gap.
 2. **HUD (the holographic overlay)** — no v2 spec. v1's `overlay.py` is the reference implementation, but the chatbot-first design hasn't specified whether/how the arc-reactor HUD returns. Not needed for Wave 1–2; needed before any "JARVIS feel" work.
 3. **MCP servers inside plugins** — explicitly deferred by the skill spec (OQ4): "ship skills first, MCP second. Needs a dedicated study before v2 ships plugin MCP support."
 4. **Skill version migration** — unspecified (skill-spec OQ6): v1→v2 of a skill with stored data has no migration story.
@@ -294,4 +294,4 @@ Every section above traces to:
 - `~/workspace/jarvis-knowledge/DECISION-PLAYBOOK.md` (S1–S8, V1–V8, A1–A8, M1–M4, P1–P5)
 - `~/workspace/jarvis-knowledge/MASTER-INDEX.md` (the knowledge map this document caps)
 
-**Honest completion (Rule 12):** Researched: 13 spec files read (headers + interface sections + open questions). Validated: cross-references checked (e.g., phone-spec §5.2 resolves session-store OQ2; skill E-8 logs to session store; approval tokens bound to action hash per fault-tree B3/B8). Saved: 1 file. Tested/Measured: nothing — synthesis only, as tasked. Incomplete: chat UI + HUD have no specs (§6). Blocked: implementation awaits Owais's go-ahead (§7).
+**Historical synthesis note (Rule 12):** The original research pass read 13 spec files (headers + interface sections + open questions), checked cross-references, and saved this map; it did not test or measure implementation. Since that pass, `learn-chat-ui-spec.md` was added: the chat UI has a spec but its Tauri/React implementation remains missing. The HUD still has no v2 spec. Current implementation status belongs in `IMPLEMENTATION-GAP-AUDIT.md`, not in this historical research note.
