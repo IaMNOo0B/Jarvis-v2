@@ -397,14 +397,19 @@ def test_retrying_one_of_multiple_failed_actions_does_not_clear_the_other():
 
     llm = ScriptedLLM([
         "TOOL: write_file\nARGS: {\"path\": \"first.txt\"}",
+        "TOOL: get_time\nARGS: {}",
         "TOOL: write_file\nARGS: {\"path\": \"second.txt\"}",
         "TOOL: write_file\nARGS: {\"path\": \"first.txt\"}",
         "The files were saved successfully.",
     ])
     brain = make_brain(
         llm,
-        tools=[ToolDef(name="write_file", description="Write a file.",
-                       parameters={}, fn=_write)],
+        tools=[
+            ToolDef(name="write_file", description="Write a file.",
+                    parameters={}, fn=_write),
+            ToolDef(name="get_time", description="Current time.", parameters={},
+                    fn=lambda a: "12:00"),
+        ],
     )
 
     result = brain.respond("s1", "save first.txt and second.txt")
