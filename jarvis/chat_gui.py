@@ -762,24 +762,6 @@ def main() -> None:
             "JARVIS — cannot start",
             "Preflight failed:\n\n" + "\n".join("• " + p for p in problems))
         sys.exit(2)
-    app = ChatApp(base_dir, data_dir)
-    ChatWindow(app).run()
-
-
-def main() -> None:
-    base_dir = Path(__file__).resolve().parent.parent
-    data_dir = base_dir / "data"
-    # Reuse the CLI's preflight + ChatApp wiring.
-    from jarvis.chat import preflight, ChatApp
-    problems = preflight(base_dir, data_dir)
-    if problems:
-        # No terminal here — show the problems in a dialog and exit.
-        root = tk.Tk()
-        root.withdraw()
-        tk.messagebox.showerror(
-            "JARVIS — cannot start",
-            "Preflight failed:\n\n" + "\n".join("• " + p for p in problems))
-        sys.exit(2)
     # F-06: build the brain OFF the UI thread. The window appears instantly
     # with "warming up…"; the app attaches when its health probes finish.
     window = ChatWindow(None)
