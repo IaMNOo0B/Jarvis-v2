@@ -166,3 +166,13 @@ def test_pc_open_url_rejects_non_http_schemes():
         assert "HTTP/HTTPS" in str(exc)
     else:
         raise AssertionError("non-HTTP URL should be rejected")
+
+
+
+def test_approved_pc_executor_uses_pc_controller_not_skill_registry():
+    app = object.__new__(ChatApp)
+    app._pc = SimpleNamespace(
+        launch_app=lambda name: {"ok": True, "name": name})
+    assert app._executor("pc.launch_app", {"name": "Chrome"}) == {
+        "ok": True, "name": "Chrome"
+    }
