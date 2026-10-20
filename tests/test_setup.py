@@ -433,3 +433,12 @@ def test_check_updates_stub_shape():
 def test_main_preflight_exit_zero(tmp_path, plenty_of_disk):
     from jarvis.setup import main
     assert main(["--data-dir", str(tmp_path), "--preflight"]) == 0
+
+def test_desktop_chat_grants_web_and_approved_sandbox_capabilities():
+    from jarvis.chat import TURN_ALLOWANCES
+
+    assert "net.outbound" in TURN_ALLOWANCES
+    assert "exec" in TURN_ALLOWANCES
+    # Shell execution remains a distinct capability; this does not grant it.
+    assert "shell.exec" not in TURN_ALLOWANCES
+
