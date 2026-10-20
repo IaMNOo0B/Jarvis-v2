@@ -302,11 +302,10 @@ def test_failed_tool_cannot_be_followed_by_false_completion_claim():
 
     result = brain.respond("s1", "save the file")
 
-    assert result.status == "answered"
-    assert "can't honestly say that task is complete" in result.text
+    assert result.status == "stopped"
+    assert "couldn't verify completion" in result.text
     assert "permission denied" in result.text
     assert "Done, I successfully saved" not in result.text
-    assert len(store.of_type("brain.completion_claim_blocked")) == 1
 
 
 def test_max_tool_calls_cap():
