@@ -627,12 +627,21 @@ class Brain:
                          "reason": getattr(decision, "reason", "")},
                         causal_parent=last_parent)
                     last_parent = call_ev
-                    # Transient tool message — never a fake user turn.
+                    last_action_issue = (
+                        f"the Gate denied '{name}': "
+                        f"{getattr(decision, 'reason', 'not allowed')}"
+                    )
+                    last_failed_tool_name = name
+                    last_failed_tool_args = json.dumps(
+                        args, sort_keys=True, ensure_ascii=False, default=str
+                    )
+                    # The denied action did not run. Keep the denial unresolved;
+                    # an unrelated successful tool must not imply it worked.
                     messages.append({"role": "tool", "name": name,
                                      "content": f"error: the gate denied this call "
                                                 f"({getattr(decision, 'reason', 'not allowed')}). "
-                                                "Try a different approach or answer directly."})
-                    continue  # denial is enforcement working, not a tool failure
+                                                "The action did not execute."})
+                    continue
 
                 if verdict == "require_approval":
                     # Gate is the first statement: the check ran BEFORE any
