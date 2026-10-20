@@ -115,10 +115,10 @@ python -m pytest tests/
 Tests use fakes for model/network operations; they do not replace testing with a
 real model and Windows desktop. Never claim an action succeeded until JARVIS
 receives a confirming tool result. A failed action remains unresolved until the
-same tool with the same arguments succeeds; an unrelated success does not erase
-that failure. Gate-denied actions are also unresolved because they never ran.
-If an issue remains unresolved, JARVIS stops honestly instead of claiming
-completion.
+each unresolved action is tracked by its exact tool and arguments, and an
+unrelated success does not erase it. Gate-denied actions are also unresolved
+because they never ran. If any issue remains unresolved, JARVIS stops honestly
+instead of claiming completion.
 
 External research and adoption decisions are tracked in
 [docs/EXTERNAL-RESEARCH-AND-ADOPTION.md](docs/EXTERNAL-RESEARCH-AND-ADOPTION.md).
