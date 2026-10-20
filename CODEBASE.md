@@ -28,8 +28,9 @@ User → Chat UI / CLI → Brain → Gate → Skills / PC Control / Memory
 
 ### chat.py — The Wiring
 - **What**: `ChatApp` connects everything. `turn()` → brain → approvals → output.
-- **Brain chain** (smartest first): keyed cloud → Ollama local → OmniRoute → Pollinations keyless → stub.
-- **Commands**: `/key`, `/keys`, `/keymove`, `/provider`, `/memory`, `/recall`, `/skills`, `/session`.
+- **Brain chain**: configured Ollama local first → keyed cloud providers → OmniRoute → Pollinations keyless → stub. The actual chain is exposed by `/status` and the read-only `/doctor`; the last provider used is reported separately.
+- **Commands**: `/status`, `/doctor`, `/key`, `/keys`, `/keymove`, `/provider`, `/memory`, `/recall`, `/skills`, `/session`.
+- **Tool evidence**: `tool.result` records distinguish tool-reported success/failure from independently verified postconditions; postcondition verification remains explicitly false until a verifier exists.
 
 ### session_store.py — The Memory of Record
 - SQLite WAL. Tables: sessions, events (ULID PK), checkpoints, tombstones.
