@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import html as _html
 import hashlib
+import ipaddress
 import json
 import re
+import socket
 from datetime import datetime, timezone
 import urllib.parse
 import urllib.request
@@ -87,10 +89,45 @@ def _search(query: str, max_results: int = 5) -> Dict[str, Any]:
                                   "count": len(results)}}
 
 
+def _validate_public_url(url: str) -> tuple[bool, str]:
+    """Permit public web URLs only; block local/private network targets."""
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return False, "URL must use http:// or https://"
+        if not parsed.hostname or parsed.username or parsed.password:
+            return False, "URL must have a public hostname and no embedded credentials"
+        if parsed.port not in (None, 80, 443):
+            return False, "Only standard HTTP/HTTPS ports are allowed"
+        host = parsed.hostname.rstrip(".").lower()
+        if host == "localhost" or host.endswith((".localhost", ".local", ".internal")):
+            return False, "Local and internal hostnames are blocked"
+        try:
+            ip = ipaddress.ip_address(host)
+            if not ip.is_global:
+                return False, "Private, loopback, and reserved IP addresses are blocked"
+            addresses = [ip]
+        except ValueError:
+            try:
+                addresses = [
+                    ipaddress.ip_address(item[4][0])
+                    for item in socket.getaddrinfo(host, parsed.port or
+                        (443 if parsed.scheme.lower() == "https" else 80),
+                        type=socket.SOCK_STREAM)
+                ]
+            except OSError as exc:
+                return False, f"Could not resolve public hostname: {exc}"
+            if not addresses or any(not addr.is_global for addr in addresses):
+                return False, "Hostname resolves to a private or non-public address"
+        return True, ""
+    except (ValueError, TypeError) as exc:
+        return False, f"Invalid URL: {exc}"
+
+
 def _fetch(url: str) -> Dict[str, Any]:
-    if not url.startswith(("http://", "https://")):
-        return {"ok": False, "code": "bad_url",
-                "message": "URL must start with http(s)://"}
+    allowed, reason = _validate_public_url(url)
+    if not allowed:
+        return {"ok": False, "code": "bad_url", "message": reason}
     req = urllib.request.Request(url, headers=_UA)
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
