@@ -646,6 +646,10 @@ class Brain:
                                     {"tool": name, "args": args,
                                      "gate_verdict": verdict},
                                     causal_parent=last_parent)
+                # Count every actual execution attempt, including a failed
+                # tool or a malformed registry result. The cap must not be
+                # bypassed by tools that return errors instead of raising.
+                tool_calls_made += 1
                 tool = self.tools.get(name)
                 if tool is None or tool.fn is None:
                     consecutive_failures += 1
@@ -665,8 +669,16 @@ class Brain:
                     continue
                 try:
                     raw_out = tool.fn(args)
-                    ok, content = True, (raw_out if isinstance(raw_out, str)
-                                         else json.dumps(raw_out, default=str))
+                    # The skill registry uses a structured {ok: false, ...}
+                    # result for validation, quarantine, and runtime failures.
+                    # Treating that dictionary as a successful result lets the
+                    # model accidentally report a failed task as completed.
+                    if isinstance(raw_out, dict) and raw_out.get("ok") is False:
+                        ok = False
+                        content = json.dumps(raw_out, ensure_ascii=False, default=str)
+                    else:
+                        ok, content = True, (raw_out if isinstance(raw_out, str)
+                                             else json.dumps(raw_out, default=str))
                 except Exception as exc:
                     ok, content = False, f"error: tool '{name}' raised: {exc}"
                 self._log(session_id, "tool.result",
@@ -685,7 +697,6 @@ class Brain:
                         )
                     continue
                 consecutive_failures = 0
-                tool_calls_made += 1
                 wrapped = self.gate.wrap_output(content, name)
                 messages.append({"role": "tool", "name": name, "content": wrapped})
 
