@@ -246,10 +246,17 @@ class Brain:
         lines = [self._persona, "", _MODEL_PROTOCOL]
         if self._self_knowledge:
             lines += ["", self._self_knowledge]
-        lines.append("Available tools:")
+        lines.append("Available tools (use only these exact names):")
         for t in self.tools.values():
-            req = (t.parameters or {}).get("required", [])
-            lines.append(f"- {t.name}: {t.description} (required: {req})")
+            schema = t.parameters or {}
+            # Models need the argument names, types, and descriptions—not
+            # only the required-slot list—to call real tools reliably.
+            schema_text = json.dumps(
+                schema, ensure_ascii=False, separators=(",", ":"), default=str)
+            lines.append(
+                f"- {t.name}: {t.description}\n"
+                f"  Parameters schema: {schema_text}"
+            )
         return "\n".join(lines)
 
     # -- event logging -------------------------------------------------------- #
