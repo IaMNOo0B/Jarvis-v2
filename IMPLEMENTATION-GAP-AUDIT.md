@@ -21,10 +21,10 @@ The latest Windows CI run for this branch reports **566 passed, 3 skipped**. The
 
 | Area | Current evidence in repository | What still needs to happen |
 |---|---|---|
-| Chat and provider fallback | jarvis/chat.py, jarvis/brain.py, Ollama/cloud provider adapters, /status; CI covers many unit paths | Verify on Sir's PC that the configured Ollama model name exists, the provider actually answers, fallback works during a real outage, and responses are not silently coming from the stub |
+| Chat and provider fallback | jarvis/chat.py, jarvis/brain.py, Ollama/cloud provider adapters, /status; local Ollama is now ordered before cloud fallbacks | Verify on Sir's PC that the configured Ollama model name exists, the provider actually answers, fallback works during a real outage, and responses are not silently coming from the stub |
 | Request fulfillment / tools | Manifest-driven skills, schema validation, Gate, approvals, code/notes/clock/web/knowledge skills, PC-control tool definitions | Add an end-to-end acceptance suite for natural-language requests → correct tool → observed result → truthful final response; exercise multi-step tasks, failures, retries, and STOP |
 | Internet research | web_search, web_fetch, web_learn, learning_search; web notes include source URLs, retrieval time, hashes, and untrusted-source labels; private/local destinations are blocked in URL validation | Test real public websites and redirects on Windows; add source-quality/conflict handling, clear citations in answers, and size/rate limits for repeated research |
-| Learning / memory | SQLite facts + episodes, full-text recall, provenance/quarantine for facts, automatic episodic recall/write is now wired into the brain | Tighten privacy and trust policy before merging: the new episode loop must not persist sensitive or instruction-injection content merely because a simple credential regex missed it. Add explicit per-memory provenance, deletion/forgetting tests, and consolidation only after safe capture is proven |
+| Learning / memory | SQLite facts + episodes, full-text recall, provenance/quarantine for facts; recalled snippets are now passed as explicitly untrusted tool evidence, not injected into system instructions. Automatic episode capture is opt-in and off by default; conservative filters skip obvious credentials, contact identifiers, and some injection patterns | The filter is not a privacy guarantee. Add user-reviewed capture/retention controls, provenance for episodes, and tested episode deletion/forgetting before broadening automatic capture |
 | Self-critique | Existing critique module is now enabled through config for longer answers | Test whether it catches factual/tool-result errors and does not rewrite correct answers into worse ones; keep a bounded retry/call budget |
 | Self-upgrade | Setup/update-related code and documentation exist | No verified, complete signed-update + staged-install + rollback lifecycle has been demonstrated. Build update checking, signature/hash verification, staged apply on restart, rollback, and user-visible approval. Never allow model output to directly install or replace code |
 | Safety / approvals | Gate, risk tiers, action hashes, approval token logic, DCL, filesystem-jail and attack tests | Close the threat-model gaps: data classification before cloud sends, clipboard/secret handling, DNS-egress concerns, and remaining partial attack cases. Prove all side effects route through the Gate |
@@ -39,8 +39,8 @@ The latest Windows CI run for this branch reports **566 passed, 3 skipped**. The
 
 ### P0 — Make current behavior honest and safe
 1. Fix stale documentation and keep the repo's status map aligned with actual code.
-2. Review the new automatic episode-writing path for sensitive data and prompt-injection persistence; add conservative tests before enabling it for every turn.
-3. Make /status report configured providers separately from the provider that actually answered the last turn; clearly label stub/degraded mode.
+2. Keep automatic episode capture opt-in by default; recalled memory is untrusted evidence, never system instructions. Continue adding privacy, retention, provenance, and deletion controls.
+3. Make /status distinguish the provider chain from the provider that actually answered the last turn; clearly label stub/degraded mode.
 4. Ensure every tool result is treated as untrusted evidence, every side effect passes through the Gate, and failures are never reported as success.
 
 ### P1 — Prove the core assistant end to end
