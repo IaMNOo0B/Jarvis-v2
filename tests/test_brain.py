@@ -115,7 +115,8 @@ class ScriptedLLM:
 
 
 def make_brain(llm, gate=None, store=None, rules=None, tools=None,
-               off_machine=False, max_rounds=3, max_tool_calls=12):
+               off_machine=False, max_rounds=3, max_tool_calls=12,
+               memory=None, auto_learn=False, self_critique=False):
     tools = tools if tools is not None else [
         ToolDef(name="get_time", description="Current time.", parameters={},
                 fn=lambda args: "12:00"),
@@ -123,7 +124,9 @@ def make_brain(llm, gate=None, store=None, rules=None, tools=None,
     return Brain(gate=gate or FakeGate(), session_store=store or FakeSessionStore(),
                  rules=rules or FakeRules(), llm_call=llm,
                  tools=tools, llm_off_machine=off_machine,
-                 max_rounds=max_rounds, max_tool_calls=max_tool_calls)
+                 max_rounds=max_rounds, max_tool_calls=max_tool_calls,
+                 memory=memory, auto_learn=auto_learn,
+                 self_critique=self_critique)
 
 
 @pytest.fixture
@@ -571,4 +574,82 @@ def test_configured_budgets_are_clamped_to_safe_ranges():
 
     assert brain.max_rounds == 10
     assert brain.max_tool_calls == 50
+
+class FakeLearningMemory:
+    def __init__(self, recalled=None):
+        self.recalled = list(recalled or [])
+        self.episodes = []
+        self.recall_queries = []
+
+    def recall(self, query, limit=5):
+        self.recall_queries.append((query, limit))
+        return self.recalled[:limit]
+
+    def write_episode(self, summary, session_id, causal_ref=None):
+        self.episodes.append({
+            "summary": summary, "session_id": session_id,
+            "causal_ref": causal_ref,
+        })
+        return len(self.episodes)
+
+
+def test_auto_learning_saves_answer_and_recalls_it_on_later_turn():
+    memory = FakeLearningMemory()
+    llm = ScriptedLLM(["I explained how to install Ollama.", "Use Ollama for local inference."])
+    brain = make_brain(llm, memory=memory, auto_learn=True)
+
+    first = brain.respond("s1", "How do I install Ollama?")
+    assert first.status == "answered"
+    assert len(memory.episodes) == 1
+    assert "install Ollama" in memory.episodes[0]["summary"]
+
+    memory.recalled = [{
+        "snippet": "User request: How do I install Ollama? JARVIS answer: I explained the install steps.",
+        "quarantined": False,
+    }]
+    second = brain.respond("s2", "What was the local model setup?")
+    assert second.status == "answered"
+    assert memory.recall_queries == [
+        ("How do I install Ollama?", 3),
+        ("What was the local model setup?", 3),
+    ]
+    assert "LOCAL MEMORY" in llm.prompts[1][0]["content"]
+    assert "past conversation snippets" in llm.prompts[1][0]["content"]
+
+
+def test_auto_learning_skips_obvious_credentials():
+    memory = FakeLearningMemory()
+    llm = ScriptedLLM(["I will not repeat your password."])
+    brain = make_brain(llm, memory=memory, auto_learn=True)
+
+    result = brain.respond("s1", "My password = supersecret123")
+
+    assert result.status == "answered"
+    assert memory.episodes == []
+
+
+def test_auto_learning_disabled_does_not_read_or_write_memory():
+    memory = FakeLearningMemory()
+    llm = ScriptedLLM(["A concise answer."])
+    brain = make_brain(llm, memory=memory, auto_learn=False)
+
+    result = brain.respond("s1", "What is a local model?")
+
+    assert result.status == "answered"
+    assert memory.recall_queries == []
+    assert memory.episodes == []
+
+
+def test_self_critique_can_be_enabled_for_answer_review():
+    llm = ScriptedLLM([
+        "This answer is intentionally longer than fifty characters so the review runs.",
+        "VIOLATIONS: none\\nREVISED: NO CHANGE NEEDED",
+    ])
+    brain = make_brain(llm, self_critique=True)
+
+    result = brain.respond("s1", "Explain local models")
+
+    assert result.status == "answered"
+    assert llm.calls == 2
+    assert result.text.startswith("This answer is intentionally")
 
