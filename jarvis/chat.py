@@ -192,6 +192,7 @@ class ChatApp:
             "brain": {
                 "max_rounds": Field(int, 3, min=1, max=10),
                 "max_tool_calls": Field(int, 12, min=1, max=50),
+                "omniroute_model": Field(str, "google/gemini-2.5-flash"),
             },
             "data_retention_days": Field(int, 365),
         }
