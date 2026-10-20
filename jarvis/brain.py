@@ -590,7 +590,7 @@ class Brain:
                                       causal_parent=last_parent)
                     except Exception:
                         pass  # Critique never blocks the answer.
-remove keyword detector                self._log(session_id, "brain.reply", {"text": final_text},
+                self._log(session_id, "brain.reply", {"text": final_text},
                           causal_parent=last_parent, actor="brain",
                           trust="user")
                 if self.auto_learn and self._episode_capture_is_safe(user_text, final_text):
