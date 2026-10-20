@@ -44,11 +44,35 @@ API key. It requires an internet connection and depends on that service's
 availability and fair-use limits. Do not send sensitive information to a
 third-party model.
 
+## Learning and self-improvement
+
+JARVIS can now keep a local episodic memory of answered turns and retrieve
+relevant snippets in later conversations. Obvious credential-like text is
+skipped, but this is a heuristic—not a guarantee—so avoid entering passwords,
+API keys, or highly sensitive information.
+
+For internet research, ask JARVIS to **"learn about [topic] and save the sources"**.
+It can use `web_learn` to fetch and save up to three pages under the local
+`learned/` data folder, with source URLs, timestamps, hashes, and explicit
+untrusted-content labels. Later it can use `learning_search` to retrieve those
+notes. This is retrieval-based learning: it **does not retrain model weights**.
+
+Self-critique is enabled by default and may make an additional model call to
+review longer answers against JARVIS's rules. This can increase response time
+and cloud usage.
+
+JARVIS does **not** silently rewrite or upgrade its own application code.
+A proposed code change should be reviewed, tested, and explicitly approved
+before it is installed. Web pages are untrusted data; saved notes never become
+system instructions.
+
 ## What you can ask it to do
 
 Examples:
 - "Explain recursion in simple English."
 - "Search the web for the latest Ollama setup instructions and summarize them."
+- "Learn about local AI memory systems and save the source notes."
+- "What did you learn about local AI memory systems? Search your learned notes."
 - "Write a note called exam-plan with my revision schedule."
 - "Look at the current screen and tell me what is open."
 - "Create a small Python script that sorts a list."
