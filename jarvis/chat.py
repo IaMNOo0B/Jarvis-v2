@@ -145,9 +145,11 @@ class StubLLM:
 # --------------------------------------------------------------------------- #
 
 # Turn allowances (policy, never the brain's choice):
-# reads auto-allowed; file writes allowed by capability (tier-2 still
-# announces + undo); network/exec/clipboard NOT granted in Wave 1.
-TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read"]
+# reads auto-allowed; file writes use the tier-2 undo path; outbound network
+# is limited to declared web tools, and code execution remains tier-3 gated.
+# Web reads need net.outbound; sandboxed code execution needs exec and still
+# passes the tier-3 approval gate. The code sandbox itself blocks networking.
+TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read", "net.outbound", "exec"]
 
 # First-party skills ship WITH v2: approved at first run (the voicebox
 # pattern — first-party skips approval, never the sandbox).
@@ -190,8 +192,18 @@ class ChatApp:
         schema = {
             "profile": Field(str, "owais"),
             "brain": {
-                "max_rounds": Field(int, 3, min=1, max=10),
+                "max_rounds": Field(int, 5, min=1, max=10),
                 "max_tool_calls": Field(int, 12, min=1, max=50),
+                "self_critique": Field(bool, True),
+                "ollama_model": Field(str, "qwen2.5:7b-instruct-q4_K_M"),
+                "ollama_base_url": Field(str, "http://localhost:11434"),
+                "omniroute_model": Field(str, "google/gemini-2.5-flash"),
+            },
+            "learning": {
+                "enabled": Field(bool, True),
+                # Saving conversation content is opt-in; privacy filters are
+                # heuristic and cannot guarantee that all sensitive data is caught.
+                "auto_episode_capture": Field(bool, False),
             },
             "data_retention_days": Field(int, 365),
         }
@@ -286,13 +298,22 @@ class ChatApp:
         from jarvis.brain import FallbackChain, chain_as_llm_call
         from jarvis.llm_ollama import make_llm_call, OllamaProvider, OllamaCall
         ollama_provider = None
+        self._ollama_status = "Ollama has not been checked yet."
+        ollama_model = self.config.get(
+            "brain.ollama_model", "qwen2.5:7b-instruct-q4_K_M")
+        ollama_base_url = self.config.get(
+            "brain.ollama_base_url", "http://localhost:11434")
         try:
-            ollama_call = OllamaCall(rules=self.rules)
-            ok, _ = ollama_call.check_health()
+            ollama_call = OllamaCall(
+                base_url=ollama_base_url, model=ollama_model, rules=self.rules)
+            ok, ollama_status = ollama_call.check_health()
+            self._ollama_status = ollama_status
+            print(f"[llm] {ollama_status}")
             if ok:
                 ollama_provider = OllamaProvider(ollama_call)
-        except Exception:
-            pass
+        except Exception as exc:
+            self._ollama_status = f"Ollama check failed: {exc}"
+            print(f"[llm] {self._ollama_status}")
         omni_provider = None
         try:
             from jarvis.llm_omniroute import make_omniroute_call, OmniRouteProvider
@@ -321,12 +342,13 @@ class ChatApp:
             keyed = make_compat_providers(data_dir=str(self.data_dir))
         except Exception:
             pass
-        # Order: keyed cloud (smartest) -> Ollama local -> OmniRoute ->
-        # keyless Pollinations. The owner's keys win when they exist.
+        # Match the knowledge-book routing policy: local daily driver first,
+        # then configured cloud providers as fallbacks. If Ollama is absent,
+        # the first available cloud provider is used; status reports that fact.
         providers = []
-        providers.extend(keyed)
         if ollama_provider is not None:
             providers.append(ollama_provider)
+        providers.extend(keyed)
         if omni_provider is not None:
             providers.append(omni_provider)
         if poll_provider is not None:
@@ -367,9 +389,87 @@ class ChatApp:
             # OmniRoute -> Pollinations); redact always — harmless for local
             # (PUBLIC/PERSONAL pass through), correct for cloud.
             self_knowledge=self_knowledge,
+            max_rounds=self.config.get("brain.max_rounds", 5),
+            max_tool_calls=self.config.get("brain.max_tool_calls", 12),
+            self_critique=self.config.get("brain.self_critique", True),
+            memory=self.memory,
+            memory_enabled=self.config.get("learning.enabled", True),
+            auto_learn=self.config.get("learning.auto_episode_capture", False),
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
+
+    def status_report(self) -> str:
+        """Return a truthful local status report without exposing secrets."""
+        chain = getattr(self, "_chain", None)
+        providers = [getattr(p, "name", "unknown")
+                     for p in getattr(chain, "providers", [])]
+        if not providers:
+            providers = ["stub (no real provider connected)"]
+        learned_dir = self.data_dir / "learned"
+        try:
+            learned_count = sum(1 for p in learned_dir.glob("*.md") if p.is_file())
+        except Exception:
+            learned_count = 0
+        chain_state = ("stub only — no model provider initialized"
+                       if getattr(self, "_chain", None) is None
+                       else "initialized; providers are not all health-checked")
+        return "\n".join([
+            "JARVIS status:",
+            f"- Provider chain: {chain_state}",
+            f"- Providers in fallback chain (not all health-checked): {', '.join(providers)}",
+            f"- Last response provider: {self.last_provider}",
+            f"- Ollama startup health: {getattr(self, '_ollama_status', 'not checked')}",
+            f"- Memory recall: {'on' if self.config.get('learning.enabled', True) else 'off'}",
+            f"- Automatic episode capture: {'ON (conversation text may be saved locally)' if self.config.get('learning.auto_episode_capture', False) else 'off (opt-in; recommended default)'}",
+            f"- Self-critique: {'on' if self.config.get('brain.self_critique', True) else 'off'}",
+            f"- Saved web-learning notes: {learned_count}",
+            "- Internet research tools: web_search, web_fetch, web_learn, learning_search (availability depends on provider/network)",
+        ])
+
+    def doctor_report(self) -> str:
+        """Read-only readiness diagnostics; never installs, repairs, or phones home."""
+        chain = getattr(self, "_chain", None)
+        providers = [getattr(p, "name", "unknown")
+                     for p in getattr(chain, "providers", [])]
+        if not providers:
+            providers = ["stub (no real provider connected)"]
+
+        records = getattr(getattr(self, "registry", None), "_records", {})
+        try:
+            skill_names = sorted(records)
+            quarantined = sum(1 for rec in records.values()
+                              if not getattr(rec, "approved", False))
+        except Exception:
+            skill_names, quarantined = [], 0
+
+        data_dir = Path(getattr(self, "data_dir", "."))
+        learned_dir = data_dir / "learned"
+        try:
+            learned_count = sum(1 for p in learned_dir.glob("*.md") if p.is_file())
+        except OSError:
+            learned_count = 0
+        try:
+            data_writable = data_dir.is_dir() and os.access(data_dir, os.W_OK)
+        except OSError:
+            data_writable = False
+
+        pc = getattr(self, "_pc", None)
+        ollama = getattr(self, "_ollama_status", "not checked")
+        memory = "available" if getattr(self, "memory", None) is not None else "unavailable"
+        return "\n".join([
+            "JARVIS doctor (read-only; no repairs or installs performed):",
+            f"- Brain provider chain: {', '.join(providers)}",
+            f"- Last response provider: {getattr(self, 'last_provider', 'unknown')}",
+            f"- Ollama startup check: {ollama}",
+            f"- Registered skills: {len(skill_names)}",
+            f"- Quarantined skills: {quarantined}",
+            f"- PC control: {'initialized' if pc is not None else 'not initialized'}",
+            f"- Memory subsystem: {memory}",
+            f"- Saved research notes: {learned_count}",
+            f"- Data directory writable: {'yes' if data_writable else 'no / unavailable'}",
+            "Next step: use the specific failed check above; this command does not change your PC.",
+        ])
 
     @property
     def last_provider(self) -> str:
@@ -386,6 +486,9 @@ class ChatApp:
 
     # -- the turn ---------------------------------------------------------- #
     def turn(self, text: str) -> None:
+        if text.strip().lower() == "/status":
+            print(self.status_report())
+            return
         self._turn_id += 1
         print("[thinking]")
         try:
@@ -428,7 +531,7 @@ class ChatApp:
             if approved:
                 decision, out = self.gate.execute_approved(
                     gate_req.get("token", ""), req.get("tool", ""),
-                    req.get("args", {}), executor=self._executor)
+                    req.get("args", {}), executor=self._executor_approved)
                 print(f"[approved] {decision.reason}")
                 if out:
                     print(out[:500])
@@ -458,6 +561,9 @@ class ChatApp:
             return self._pc.type_into_field(args["element_id"], args.get("text", ""))
         if op == "key":
             return self._pc.press_key(args.get("key", ""))
+        if op == "shell":
+            # This path is reached only after the Gate's tier-3 approval.
+            return self._pc.run_in_terminal(args["command"])
         raise RuntimeError(f"unknown pc op: {op}")
 
     def _executor(self, tool_name: str, args: dict):
@@ -471,6 +577,35 @@ class ChatApp:
         result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
         if not result.get("ok"):
             raise RuntimeError(f"{result.get('code')}: {result.get('message')}")
+        return result["result"]
+
+    def _executor_approved(self, tool_name: str, args: dict):
+        """Execute only after Gate.execute_approved has verified its token.
+
+        The normal registry risk gate would ask for tier-3 approval again,
+        making approved code_run actions impossible. This callback is only
+        supplied to execute_approved, which validates the exact tool, schema,
+        and action-bound token before calling it.
+        """
+        if tool_name.startswith("pc.") and self._pc is not None:
+            return self._pc_call(tool_name, args)
+
+        from jarvis.skills.registry import SkillContext
+        ctx = SkillContext(
+            skill_name="chat", capabilities=self._allowances,
+            jail_dir=str(self.data_dir), turn_id=self._turn_id)
+
+        def risk_gate(tn: str, tier: int, candidate: dict, _ctx) -> bool:
+            if tn == tool_name and tier == 3 and candidate == args:
+                return True
+            decision = self.gate.check(tn, candidate, self._allowances)
+            return decision.verdict in (
+                self._Verdict.ALLOW, self._Verdict.ALLOW_WITH_UNDO)
+
+        result = self.registry.dispatch(tool_name, args, ctx, risk_gate)
+        if not result.get("ok"):
+            raise RuntimeError(
+                f"{result.get('code')}: {result.get('message')}")
         return result["result"]
 
     def start_phone(self) -> None:
@@ -656,8 +791,15 @@ class ChatApp:
         if text == "/quit":
             print("[stopped] Session saved. Goodbye, sir.")
             return True
+        if text == "/status":
+            print(self.status_report())
+            return True
+        if text == "/doctor":
+            print(self.doctor_report())
+            return True
         if text == "/help":
-            print("Commands: /quit, /session (show session id), "
+            print("Commands: /quit, /status (provider + learning health), "
+                  "/doctor (read-only readiness checks), /session (show session id), "
                   "/skills (list), /memory <fact> (remember), /recall <q>, "
                   "/key <paste-your-key> (store API key), /keys (list), "
                   "/keymove <wrong> <right> (fix misidentified key), "

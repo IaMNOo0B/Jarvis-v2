@@ -266,15 +266,18 @@ def test_actions_logged_to_session_store():
     with tempfile.TemporaryDirectory() as d:
         db = os.path.join(d, "s.db")
         store = SessionStore(db)
-        sid = store.create_session("owais", "test")
-        c = PCController(backend=make_backend(),
-                         session_store=store, session_id=sid)
-        c.observe()
-        c.click_element("btn-save")
-        evs = store.get_events(sid)
-        types = [e["type"] for e in evs]
-        assert "pc.observe" in types
-        assert "pc.click" in types
+        try:
+            sid = store.create_session("owais", "test")
+            c = PCController(backend=make_backend(),
+                             session_store=store, session_id=sid)
+            c.observe()
+            c.click_element("btn-save")
+            evs = store.get_events(sid)
+            types = [e["type"] for e in evs]
+            assert "pc.observe" in types
+            assert "pc.click" in types
+        finally:
+            store.close()
 
 
 def test_logging_never_breaks_control():

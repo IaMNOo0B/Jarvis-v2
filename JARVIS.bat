@@ -2,7 +2,7 @@
 REM JARVIS v2 — double-click me. That's it.
 cd /d "%~dp0"
 
-REM --- F-05: never die silently. Check python first. ---
+REM --- F-05: never die silently. Check Python first. ---
 python --version >nul 2>&1
 if errorlevel 1 (
     echo.
@@ -12,16 +12,29 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
-
-REM --- F-07: single instance. A second double-click just nudges you. ---
-set "JARVIS_LOCK=%TEMP%\jarvis-v2.lock"
-if exist "%JARVIS_LOCK%" (
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+if errorlevel 1 (
     echo.
-    echo  [JARVIS] Already running — look for the JARVIS window.
-    echo  If it's stuck, delete %JARVIS_LOCK% and try again.
+    echo  [JARVIS] Python 3.11 or newer is required. Install 64-bit Python
+    echo  from python.org, tick "Add python.exe to PATH", then retry.
     echo.
     pause
-    exit /b 0
+    exit /b 1
+)
+
+REM --- F-07: single instance. Clear only a lock with no JARVIS GUI process. ---
+set "JARVIS_LOCK=%TEMP%\jarvis-v2.lock"
+if exist "%JARVIS_LOCK%" (
+    powershell -NoProfile -Command "if (Get-CimInstance Win32_Process ^| Where-Object { $_.CommandLine -match 'jarvis\.chat_gui' }) { exit 0 } else { exit 1 }" >nul 2>&1
+    if not errorlevel 1 (
+        echo.
+        echo  [JARVIS] Already running — look for the JARVIS window.
+        echo  If it is not visible, close the JARVIS Python process and retry.
+        echo.
+        pause
+        exit /b 0
+    )
+    del "%JARVIS_LOCK%" 2>nul
 )
 echo %date% %time% > "%JARVIS_LOCK%"
 
@@ -31,7 +44,7 @@ del "%JARVIS_LOCK%" 2>nul
 
 if not "%RC%"=="0" (
     echo.
-    echo  [JARVIS] Something went wrong ^(code %RC%^). Take a photo of this
+    echo  [JARVIS] Something went wrong (code %RC%). Take a photo of this
     echo  window and send it to Ovi — he'll know what to do.
     echo.
     pause

@@ -1,0 +1,32 @@
+name: JARVIS tests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - fix/gui-quit-and-stale-launch-lock
+  workflow_dispatch:
+
+concurrency:
+  group: jarvis-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test runner
+        run: python -m pip install --upgrade pytest
+
+      - name: Run test suite
+        run: python -m pytest tests/ -q

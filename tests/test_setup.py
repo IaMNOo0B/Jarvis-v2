@@ -433,3 +433,140 @@ def test_check_updates_stub_shape():
 def test_main_preflight_exit_zero(tmp_path, plenty_of_disk):
     from jarvis.setup import main
     assert main(["--data-dir", str(tmp_path), "--preflight"]) == 0
+
+def test_desktop_chat_grants_web_and_approved_sandbox_capabilities():
+    from jarvis.chat import TURN_ALLOWANCES
+
+    assert "net.outbound" in TURN_ALLOWANCES
+    assert "exec" in TURN_ALLOWANCES
+    # PC shell execution remains a distinct capability added only when PC control is enabled.
+    assert "shell.exec" not in TURN_ALLOWANCES
+
+def test_approved_pc_shell_routes_to_terminal_controller():
+    from jarvis.chat import ChatApp
+
+    class FakePC:
+        def __init__(self):
+            self.commands = []
+
+        def run_in_terminal(self, command):
+            self.commands.append(command)
+            return {"ok": True, "detail": "exit 0"}
+
+    app = ChatApp.__new__(ChatApp)
+    app._pc = FakePC()
+
+    result = app._pc_call("pc.shell", {"command": "echo safe-test"})
+
+    assert result["ok"] is True
+    assert app._pc.commands == ["echo safe-test"]
+
+
+def test_approved_sandbox_tool_passes_only_the_matching_tier3_action(tmp_path):
+    from jarvis.chat import ChatApp
+    from jarvis.gate import GateDecision, Verdict
+
+    class FakeRegistry:
+        def dispatch(self, tool_name, args, ctx, risk_gate):
+            allowed = risk_gate(tool_name, 3, args, ctx)
+            return ({"ok": True, "result": "executed"} if allowed else
+                    {"ok": False, "code": "gate_denied", "message": "denied"})
+
+    class FakeGate:
+        def check(self, tool_name, args, allowances):
+            return GateDecision(Verdict.REQUIRE_APPROVAL, "approval required")
+
+    app = ChatApp.__new__(ChatApp)
+    app._pc = None
+    app.registry = FakeRegistry()
+    app.gate = FakeGate()
+    app._Verdict = Verdict
+    app._allowances = ["fs.read", "exec"]
+    app.data_dir = tmp_path
+    app._turn_id = 1
+
+    result = app._executor_approved("code_run", {"code": "print(1)"})
+
+    assert result == "executed"
+
+def test_status_report_shows_provider_and_learning_state_without_secrets(tmp_path):
+    from jarvis.chat import ChatApp
+
+    class FakeConfig:
+        def get(self, path, default=None):
+            values = {
+                "learning.enabled": True,
+                "brain.self_critique": True,
+            }
+            return values.get(path, default)
+
+    class FakeProvider:
+        name = "ollama"
+
+    class FakeChain:
+        providers = [FakeProvider()]
+        last_via = "ollama"
+
+    app = ChatApp.__new__(ChatApp)
+    app.data_dir = tmp_path
+    app.config = FakeConfig()
+    app._chain = FakeChain()
+    app._ollama_status = "ollama reachable; model 'example' present"
+
+    (tmp_path / "learned").mkdir()
+    (tmp_path / "learned" / "one.md").write_text("source", encoding="utf-8")
+
+    report = app.status_report()
+
+    assert "Last response provider: ollama" in report
+    assert "Providers in fallback chain (not all health-checked): ollama" in report
+    assert "Memory recall: on" in report
+    assert "Automatic episode capture: off (opt-in; recommended default)" in report
+    assert "Self-critique: on" in report
+    assert "Saved web-learning notes: 1" in report
+    assert "example" in report
+    assert "API key" not in report
+
+
+
+def test_doctor_report_is_read_only_and_reports_missing_provider(tmp_path):
+    from jarvis.chat import ChatApp
+
+    class FakeProvider:
+        name = "ollama"
+
+    class FakeChain:
+        providers = [FakeProvider()]
+        last_via = None
+
+    class FakeRecord:
+        approved = False
+
+    class FakeRegistry:
+        _records = {"unreviewed-skill": FakeRecord()}
+
+    app = ChatApp.__new__(ChatApp)
+    app.data_dir = tmp_path
+    app._chain = FakeChain()
+    app.registry = FakeRegistry()
+    app._pc = None
+    app._ollama_status = "model missing"
+    app.memory = None
+    (tmp_path / "learned").mkdir()
+    (tmp_path / "learned" / "guide.md").write_text("evidence", encoding="utf-8")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+
+    report = app.doctor_report()
+
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    assert before == after
+    assert "read-only" in report
+    assert "Brain provider chain: ollama" in report
+    assert "Last response provider: None" in report
+    assert "Ollama startup check: model missing" in report
+    assert "Registered skills: 1" in report
+    assert "Quarantined skills: 1" in report
+    assert "PC control: not initialized" in report
+    assert "Memory subsystem: unavailable" in report
+    assert "Saved research notes: 1" in report
+    assert "Data directory writable: yes" in report
