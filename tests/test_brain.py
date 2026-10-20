@@ -519,3 +519,36 @@ def test_turn_result_str_is_user_text():
     r = TurnResult(status="answered", text="hello, sir.")
     assert str(r) == "hello, sir."
     assert isinstance(r, TurnResult)
+
+def test_system_prompt_exposes_tool_parameter_schema():
+    tool = ToolDef(
+        name="web_search",
+        description="Search the web for current information.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The search terms to use",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "description": "Maximum number of results",
+                },
+            },
+            "required": ["query"],
+        },
+        fn=lambda args: args,
+    )
+    brain = make_brain(ScriptedLLM(["hello"]), tools=[tool])
+
+    prompt = brain._system_prompt()
+
+    assert "web_search" in prompt
+    assert '"query"' in prompt
+    assert '"type":"string"' in prompt
+    assert "The search terms to use" in prompt
+    assert '"max_results"' in prompt
+    assert '"type":"integer"' in prompt
+    assert '"required":["query"]' in prompt
+
