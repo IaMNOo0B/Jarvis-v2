@@ -31,6 +31,16 @@ try:
 except Exception:  # dcl.py not built yet, or broken -> fail closed
     _dcl = None
 
+try:
+    from jarvis import shell_guard as _shell_guard
+except Exception:  # shell guard missing -> shell checks fail closed
+    _shell_guard = None
+
+try:
+    from jarvis import effects as _effects
+except Exception:  # effects journal missing -> dispatches simply don't journal
+    _effects = None
+
 
 class Verdict(Enum):
     ALLOW = "allow"
@@ -101,24 +111,89 @@ class Gate:
     """The single enforcement point between the brain and side effects."""
 
     def __init__(self, rules: Optional[dict] = None,
-                 skill_registry: Optional[dict] = None):
+                 skill_registry: Optional[dict] = None,
+                 egress_sink: Optional[Callable[[dict], None]] = None,
+                 effect_sink: Optional[Callable[[dict], None]] = None,
+                 effect_fs_root: Optional[str] = None,
+                 fact_exists: Optional[Callable[[str], bool]] = None,
+                 postcondition_evaluator: Optional[Callable] = None,
+                 contract_sink: Optional[Callable[[dict], None]] = None,
+                 flag_checker: Optional[Callable[[str, bool], bool]] = None):
         self.rules = rules or {}
         self.registry = skill_registry or {}
+        # Owner kill-switch (Team 19 E1): Config.is_enabled wired in by the
+        # app layer. Called as flag_checker(name, True) — the True default
+        # means "absent flag = enabled"; only a flag the owner explicitly
+        # set to false ("skill.<name>" or "tool.<tool.name>" in the config
+        # flags section) denies dispatch. None = no flags wired, behaviour
+        # identical to before this check existed.
+        self.flag_checker = flag_checker
+        # Optional durable "what left the machine" recorder (dcl.make_egress_
+        # sink). Called with one metadata dict per egress decision; a broken
+        # sink never changes a verdict.
+        self.egress_sink = egress_sink
+        # Recovery pack (effects journal + postcondition hook). All
+        # optional; all best-effort: this machinery is EVIDENCE, never a
+        # dependency — a broken sink/evaluator never changes a verdict,
+        # never blocks output, never raises into the dispatch path.
+        #   effect_sink: called once per successful dispatch with
+        #     {"session_id", "turn_id", "tool", "records"} (see
+        #     jarvis.effects.make_store_sink).
+        #   postcondition_evaluator: (tool, args, declared, raw) -> report
+        #     (see jarvis.contracts.make_evaluator); a failed report goes
+        #     to contract_sink as a typed "postcondition_failed" record.
+        self.effect_sink = effect_sink
+        self.effect_fs_root = effect_fs_root
+        self.fact_exists = fact_exists
+        self.postcondition_evaluator = postcondition_evaluator
+        self.contract_sink = contract_sink
         # Per-process HMAC key: tokens are unforgeable and die with the process.
         self._hmac_key = os.urandom(32)
         # P1-13: "what left the machine" feed (PERSONAL egress entries).
         self.feed_log: list[dict] = []
+
+    # ------------------------------------------------------------- kill-switch
+    def _flag_denied(self, tool_name: str,
+                     tool: Optional[dict]) -> Optional[GateDecision]:
+        """The ONE owner kill-switch check, consulted on both execution
+        paths (check + execute_approved — a switch that only guards one
+        path is theatre). A flag explicitly set false for the owning skill
+        ("skill.<skill>") or the tool itself ("tool.<tool_name>") denies;
+        absent flags never deny. A broken checker never denies either:
+        flags are an owner override, not a new failure mode."""
+        if self.flag_checker is None:
+            return None
+        names = []
+        skill = (tool or {}).get("skill")
+        if not skill and "." in tool_name:
+            skill = tool_name.split(".", 1)[0]
+        if skill:
+            names.append(f"skill.{skill}")
+        names.append(f"tool.{tool_name}")
+        for name in names:
+            try:
+                enabled = self.flag_checker(name, True)
+            except Exception:  # noqa: BLE001 - broken checker != denial
+                return None
+            if not enabled:
+                return GateDecision(
+                    Verdict.DENY, f"disabled by owner flag: {name}")
+        return None
 
     # ------------------------------------------------------------------ check
     def check(self, tool_name: str, args: dict,
               turn_allowances: list[str]) -> GateDecision:
         """THE gate. First statement of dispatch. Order is load-bearing:
 
-        1. declared?  2. schema-valid?  3. capabilities?  4. tier route.
+        1. declared?  2. owner kill-switch?  3. schema-valid?
+        4. capabilities?  5. tier route.
         """
         tool = self.registry.get(tool_name)
         if tool is None:
             return GateDecision(Verdict.DENY, f"undeclared tool: {tool_name}")
+        denied = self._flag_denied(tool_name, tool)
+        if denied is not None:
+            return denied
         ok, why = _validate_args(tool.get("schema"), args)
         if not ok:
             return GateDecision(Verdict.DENY, f"schema validation failed: {why}")
@@ -173,6 +248,52 @@ class Gate:
         except Exception:
             return False
 
+    # --------------------------------------- recovery pack (journal/hooks)
+    def _prepare_effects(self, tool: dict, args: dict) -> Optional[list]:
+        """Pre-execution: resolve the tool's DECLARED effects against the
+        pre-state (existed_before must be probed before the tool runs —
+        afterwards the truth is gone). None = nothing to journal."""
+        declared = tool.get("effects")
+        if not declared or _effects is None:
+            return None
+        try:
+            return _effects.prepare_effects(
+                declared, args, fs_root=self.effect_fs_root,
+                fact_exists=self.fact_exists)
+        except Exception:  # noqa: BLE001 - journaling never blocks a dispatch
+            return None
+
+    def _after_success(self, tool_name: str, tool: dict, args: dict,
+                       raw: Any, pending_effects: Optional[list],
+                       session_id: Optional[str], turn_id: Any) -> None:
+        """Post-execution evidence: journal the effects, then run the
+        postcondition hook. Best-effort throughout — see __init__."""
+        if pending_effects:
+            try:
+                records = _effects.finalize_effects(
+                    pending_effects, fs_root=self.effect_fs_root)
+                if records and self.effect_sink is not None:
+                    self.effect_sink({
+                        "session_id": session_id, "turn_id": turn_id,
+                        "tool": tool_name, "records": records,
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+        declared_pc = tool.get("postconditions")
+        if declared_pc and self.postcondition_evaluator is not None:
+            try:
+                report = self.postcondition_evaluator(
+                    tool_name, args, declared_pc, raw)
+                if report is not None and not report.get("passed", True) \
+                        and self.contract_sink is not None:
+                    self.contract_sink({
+                        "event": "postcondition_failed",
+                        "session_id": session_id, "turn_id": turn_id,
+                        "tool": tool_name, "report": report,
+                    })
+            except Exception:  # noqa: BLE001
+                pass
+
     # ------------------------------------------------------------ dispatch
     def _is_network_bound(self, tool: dict) -> bool:
         if tool.get("network_egress"):
@@ -182,7 +303,9 @@ class Gate:
     def dispatch(self, tool_name: str, args: dict, turn_allowances: list[str],
                  executor: Callable[[str, dict], Any],
                  payload_text: Optional[str] = None,
-                 destination: Optional[str] = None
+                 destination: Optional[str] = None,
+                 session_id: Optional[str] = None,
+                 turn_id: Any = None
                  ) -> tuple[GateDecision, Optional[str]]:
         """THE dispatch entry point. The gate is the first statement — no path
         around it. Returns (decision, wrapped_output_or_None)."""
@@ -199,15 +322,22 @@ class Gate:
             eg = self.check_egress(payload_text, destination or "unknown")
             if eg.verdict is not Verdict.ALLOW:
                 return eg, None
+        # Recovery pack: probe declared effects against the PRE-state,
+        # before the executor can change the world they describe.
+        pending_effects = self._prepare_effects(tool, args)
         try:
             raw = executor(tool_name, args)
         except Exception as exc:  # noqa: BLE001 - executor failures are denies
             return GateDecision(
                 Verdict.DENY, f"executor raised {type(exc).__name__}"), None
+        self._after_success(tool_name, tool, args, raw, pending_effects,
+                            session_id, turn_id)
         return decision, self.wrap_output(raw, source=tool_name)
 
     def execute_approved(self, token: str, tool_name: str, args: dict,
-                         executor: Callable[[str, dict], Any]
+                         executor: Callable[[str, dict], Any],
+                         session_id: Optional[str] = None,
+                         turn_id: Any = None
                          ) -> tuple[GateDecision, Optional[str]]:
         """Second half of a tier-3 flow. Re-validates declaration + schema,
         then demands the token prove the approval was for THIS action."""
@@ -215,6 +345,9 @@ class Gate:
         if tool is None or tool.get("tier") != 3:
             return GateDecision(
                 Verdict.DENY, "approved tool no longer declared tier-3"), None
+        denied = self._flag_denied(tool_name, tool)
+        if denied is not None:
+            return denied, None
         ok, why = _validate_args(tool.get("schema"), args)
         if not ok:
             return GateDecision(
@@ -223,47 +356,117 @@ class Gate:
             return GateDecision(
                 Verdict.DENY,
                 "approval token mismatch: replay or tampered args denied"), None
+        pending_effects = self._prepare_effects(tool, args)
         try:
             raw = executor(tool_name, args)
         except Exception as exc:  # noqa: BLE001
             return GateDecision(
                 Verdict.DENY, f"executor raised {type(exc).__name__}"), None
+        self._after_success(tool_name, tool, args, raw, pending_effects,
+                            session_id, turn_id)
         return (GateDecision(Verdict.ALLOW, "approved action executed"),
                 self.wrap_output(raw, source=tool_name))
 
     # ------------------------------------------------------------- egress
+    @staticmethod
+    def _class_name(cls: Any) -> str:
+        """Normalise a DCL result class to its NAME. The real DCL returns a
+        DataClass enum; compare by name, never by identity with a string
+        (an IntEnum never equals its name -- that mismatch once let SECRET
+        payloads sail through as PUBLIC)."""
+        name = getattr(cls, "name", None)
+        return str(name if name is not None else cls).upper()
+
+    @staticmethod
+    def _finding_kinds(findings: Any) -> list[str]:
+        """Finding KIND names from either representation: real DCL Finding
+        dataclasses (kind lives in .pattern) or plain dicts (.kind/.pattern).
+        Kinds only -- a secret VALUE must never reach a reason string."""
+        kinds = set()
+        for f in findings or []:
+            kind = None
+            if isinstance(f, dict):
+                kind = f.get("kind") or f.get("pattern")
+            else:
+                kind = getattr(f, "pattern", None) or getattr(f, "kind", None)
+            if kind:
+                kinds.add(str(kind))
+        return sorted(kinds)
+
+    def _record_egress(self, destination: str, class_name: str,
+                       kinds: list[str], action: str) -> None:
+        """Best-effort durable audit (P1-13). Metadata only -- never content.
+        A broken sink must never change or block a verdict."""
+        if self.egress_sink is None:
+            return
+        try:
+            self.egress_sink({
+                "ts": int(time.time()), "destination": destination,
+                "class": class_name, "kinds": kinds, "action": action,
+                "source": "gate",
+            })
+        except Exception:  # noqa: BLE001 - audit failure != egress failure
+            pass
+
     def check_egress(self, text: str, destination: str) -> GateDecision:
         """The DCL stage: governs *telling*. SECRET -> DENY (reason names the
         finding KIND, never the secret value). Independent of check()."""
         if _dcl is None:
+            self._record_egress(destination, "UNCLASSIFIED", [], "withheld")
             return GateDecision(
                 Verdict.DENY, "DCL unavailable: fail closed, no egress allowed")
         try:
             cls, findings = _dcl.classify(text or "")
         except Exception as exc:  # noqa: BLE001 - classifier failure is deny
+            self._record_egress(destination, "UNCLASSIFIED", [], "withheld")
             return GateDecision(
                 Verdict.DENY, f"DCL error: fail closed ({type(exc).__name__})")
-        kinds = sorted({f.get("kind", "unknown") for f in (findings or [])
-                        if isinstance(f, dict)})
+        name = self._class_name(cls)
+        kinds = self._finding_kinds(findings)
         label = ",".join(kinds) if kinds else "unclassified"
-        if cls == "SECRET":
+        if name == "SECRET":
+            self._record_egress(destination, name, kinds, "withheld")
             return GateDecision(
                 Verdict.DENY,
                 f"SECRET data ({label}) may never leave this machine (P0-3)")
-        if cls == "SENSITIVE":
+        if name == "SENSITIVE":
+            self._record_egress(destination, name, kinds, "held_for_confirm")
             return GateDecision(
                 Verdict.REQUIRE_APPROVAL,
                 f"SENSITIVE data ({label}) to {destination}: confirm per item (P1-13)",
                 approval_request={"destination": destination,
                                   "finding_kinds": kinds},
             )
-        if cls == "PERSONAL":
+        if name == "PERSONAL":
             self.feed_log.append({"destination": destination, "class": "PERSONAL",
                                   "kinds": kinds, "ts": int(time.time())})
+            self._record_egress(destination, name, kinds, "sent")
             return GateDecision(
                 Verdict.ALLOW,
                 f"PERSONAL data to {destination}: allowed, logged to feed")
+        self._record_egress(destination, name, kinds, "sent")
         return GateDecision(Verdict.ALLOW, f"PUBLIC data to {destination}: allowed")
+
+    # ---------------------------------------------------------- shell guard
+    def check_shell(self, command: str,
+                    legacy_check: Optional[Callable[[str], Optional[str]]] = None
+                    ) -> GateDecision:
+        """Tokenised shell blocklist (shell_guard layer 2) composed with the
+        legacy raw-string blocklist (layer 1, via the caller's callable --
+        pc_control._check_blocklist). This is a GUARD, not a tier decision:
+        shell execution stays tier-3 approval-gated regardless of the result.
+        Fails closed if the guard module is unavailable."""
+        if _shell_guard is None:
+            return GateDecision(
+                Verdict.DENY, "shell guard unavailable: fail closed")
+        verdict = _shell_guard.check_command(command or "",
+                                             legacy_check=legacy_check)
+        if verdict.blocked:
+            return GateDecision(
+                Verdict.DENY,
+                f"shell command blocked [{verdict.rule}]: {verdict.reason}")
+        return GateDecision(
+            Verdict.ALLOW, "shell command passed legacy + tokenised blocklists")
 
     # ---------------------------------------------------------- wrapping
     @staticmethod

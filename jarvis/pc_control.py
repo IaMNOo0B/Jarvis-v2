@@ -17,7 +17,13 @@ Structural invariants (enforced in code, not prompts):
 
 Tiers (for gate registration via tool_definitions()/as_gate_registry()):
   pc.observe / pc.screenshot ......... tier 1 (reads, auto-allowed)
+  pc.find_text ....................... tier 1 (OCR read; never clicks)
+  pc.ground .......................... tier 1 (vision cascade; PROPOSES a
+                                       point, never clicks — clicking a
+                                       vision target is tier-2 and refuses
+                                       unverified points, see grounding.py)
   pc.click / pc.type / pc.key ......... tier 2 (announced, undo where possible)
+  pc.launch_app ...................... tier 2 (starts a program; gated)
   pc.shell ............................ tier 3 (out-of-band approval, always)
 
 Capabilities (extend the closed skill vocabulary for PC tools):
@@ -26,15 +32,25 @@ Capabilities (extend the closed skill vocabulary for PC tools):
 
 from __future__ import annotations
 
+import base64
+import os
 import re
+import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zlib
 from dataclasses import dataclass, field
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Mapping, Optional
+
+from jarvis.grounding import GroundResult
+from jarvis.grounding import ground as _ground_cascade
+from jarvis.shell_guard import check_command as _shell_guard_check
 
 # --------------------------------------------------------------------------- #
 # Errors
@@ -129,6 +145,11 @@ class UiaBackend:
 
     # -- action ------------------------------------------------------------ #
     def click(self, element: Element) -> None:
+        raise NotImplementedError
+
+    def click_at(self, x: int, y: int) -> None:
+        """Raw coordinate click — the ONLY way a verified vision-grounded
+        point may be clicked. UIA clicks go through click(element)."""
         raise NotImplementedError
 
     def type_text(self, element: Element, text: str) -> None:
@@ -301,6 +322,16 @@ class WindowsUiaBackend(UiaBackend):
                 f"click failed on {element.name!r}: no invokable pattern"
             ) from exc
 
+    def click_at(self, x: int, y: int) -> None:
+        import ctypes
+        _require_windows("click_at")
+        user32 = ctypes.windll.user32
+        if not user32.SetCursorPos(int(x), int(y)):
+            raise ActionFailedError(
+                f"SetCursorPos failed for ({x}, {y})")
+        user32.mouse_event(0x0002, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTDOWN
+        user32.mouse_event(0x0004, 0, 0, 0, 0)  # MOUSEEVENTF_LEFTUP
+
     def type_text(self, element: Element, text: str) -> None:
         # Verbatim. No transformation, no truncation, no escaping games —
         # text goes to a FIELD, never to a shell (C-X4, corpse M-X20).
@@ -378,6 +409,9 @@ class FakeUiaBackend(UiaBackend):
 
     def click(self, element: Element) -> None:
         self._record("click", element.element_id)
+
+    def click_at(self, x: int, y: int) -> None:
+        self._record("click_at", x, y)
 
     def type_text(self, element: Element, text: str) -> None:
         # Records the EXACT string — proves no transformation (M-X20).
@@ -511,6 +545,28 @@ def tool_definitions() -> list[dict]:
          "schema": {"type": "object",
                     "properties": {"key": {"type": "string"}},
                     "required": ["key"]}},
+        {"name": "pc.launch_app", "tier": TIER_GUI,
+         "capabilities": ["ui.control"],
+         "description": "Launch an app by name (learned registry -> "
+                        "Start Menu -> PATH; no hardcoded exe paths)",
+         "schema": {"type": "object",
+                    "properties": {"name": {"type": "string"}},
+                    "required": ["name"]}},
+        {"name": "pc.find_text", "tier": TIER_READ,
+         "capabilities": ["ui.read"],
+         "description": "Find on-screen text via Windows OCR when the "
+                        "UIA tree cannot see it (read-only; coordinates only)",
+         "schema": {"type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"]}},
+        {"name": "pc.ground", "tier": TIER_READ,
+         "capabilities": ["ui.read"],
+         "description": "Locate a UI element by vision: zoom-cascade "
+                        "grounding over a screenshot, verifier-gated "
+                        "(read-only; proposes a point, never clicks)",
+         "schema": {"type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]}},
         {"name": "pc.shell", "tier": TIER_SHELL,
          "capabilities": ["ui.control", "shell.exec"],
          "description": "Run a terminal command (tier-3, blocklisted)",
@@ -528,6 +584,210 @@ def as_gate_registry() -> dict:
 
 
 # --------------------------------------------------------------------------- #
+# App registry: learned name -> path map (SQLite, stdlib)
+# --------------------------------------------------------------------------- #
+
+class AppRegistry:
+    """SQLite name->path registry for the launch ladder.
+
+    Learned from successful launches (registry hit, Start-Menu pick, or PATH
+    resolution), so repeat launches are instant and auditable. Names are
+    normalized (lowercase, trimmed) — "Chrome" and "chrome " are one entry.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
+        self.db_path = Path(db_path)
+        if str(self.db_path) != ":memory:":
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._conn = sqlite3.connect(str(self.db_path),
+                                     check_same_thread=False)
+        self._lock = threading.Lock()
+        with self._lock:
+            self._conn.execute(
+                "CREATE TABLE IF NOT EXISTS apps ("
+                "name TEXT PRIMARY KEY, path TEXT NOT NULL, "
+                "launches INTEGER NOT NULL DEFAULT 0, "
+                "last_used REAL NOT NULL DEFAULT 0)")
+            self._conn.commit()
+
+    @staticmethod
+    def _norm(name: str) -> str:
+        return " ".join(name.strip().lower().split())
+
+    def lookup(self, name: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT path FROM apps WHERE name = ?",
+                (self._norm(name),)).fetchone()
+        return row[0] if row else None
+
+    def learn(self, name: str, path: str) -> None:
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO apps (name, path, launches, last_used) "
+                "VALUES (?, ?, 1, ?) "
+                "ON CONFLICT(name) DO UPDATE SET path = excluded.path, "
+                "launches = launches + 1, last_used = excluded.last_used",
+                (self._norm(name), str(path), time.time()))
+            self._conn.commit()
+
+    def forget(self, name: str) -> bool:
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM apps WHERE name = ?",
+                                     (self._norm(name),))
+            self._conn.commit()
+            return cur.rowcount > 0
+
+    def all(self) -> list[dict]:
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT name, path, launches FROM apps ORDER BY name"
+            ).fetchall()
+        return [{"name": n, "path": p, "launches": c} for n, p, c in rows]
+
+    def close(self) -> None:
+        with self._lock:
+            self._conn.close()
+
+
+def _start_menu_dirs() -> list[Path]:
+    """Standard Start Menu Programs dirs. [] on non-Windows."""
+    if not _is_windows():
+        return []
+    out: list[Path] = []
+    for env_key in ("APPDATA", "ProgramData"):
+        base = os.environ.get(env_key)
+        if base:
+            out.append(Path(base) / "Microsoft" / "Windows" /
+                       "Start Menu" / "Programs")
+    return out
+
+
+def _launch_target(target: str) -> None:
+    """Start a target: .lnk/exe via the OS opener, else a plain exec.
+
+    Module-level so tests can substitute a recorder — launching is an OS
+    side effect, never a test side effect.
+    """
+    if _is_windows() or target.lower().endswith(".lnk"):
+        os.startfile(target)  # noqa: S606 — gated tier-2 by the caller
+    else:
+        subprocess.Popen([target])
+
+
+# --------------------------------------------------------------------------- #
+# OCR fallback: Windows.Media.Ocr via PowerShell (PanPenek pattern, our code)
+# --------------------------------------------------------------------------- #
+
+# Fixed script. The ONLY dynamic value it ever receives is $args[0] — the
+# path of a temp PNG this module generated. The search text never enters
+# the script (it is not even passed): matching happens in Python below.
+# (Structure-over-escaping: untrusted text never becomes PowerShell source —
+# the ethanplusai notifier lesson. The script is passed -EncodedCommand
+# because it is OUR fixed script; v2's blocklist forbids encoded commands
+# from the *LLM-supplied* tier-3 channel, a different trust domain.)
+_OCR_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Runtime.WindowsRuntime
+$asTaskOp = ([System.WindowsRuntimeSystemExtensions].GetMethods() |
+    Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and
+        $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]
+function Await-Op($task, $type) {
+    $net = $asTaskOp.MakeGenericMethod($type).Invoke($null, @($task))
+    $net.Wait(-1) | Out-Null
+    return $net.Result
+}
+$imgPath = $args[0]
+$null = [Windows.Storage.StorageFile, Windows.Storage, ContentType = WindowsRuntime]
+$file = Await-Op ([Windows.Storage.StorageFile]::GetFileFromPathAsync($imgPath)) ([Windows.Storage.StorageFile])
+$stream = Await-Op ($file.OpenAsync([Windows.Storage.FileAccessMode]::Read)) ([Windows.Storage.Streams.IRandomAccessStream])
+$null = [Windows.Graphics.Imaging.BitmapDecoder, Windows.Graphics.Imaging, ContentType = WindowsRuntime]
+$decoder = Await-Op ([Windows.Graphics.Imaging.BitmapDecoder]::CreateAsync($stream)) ([Windows.Graphics.Imaging.BitmapDecoder])
+$bmp = Await-Op ($decoder.GetSoftwareBitmapAsync()) ([Windows.Graphics.Imaging.SoftwareBitmap])
+$null = [Windows.Media.Ocr.OcrEngine, Windows.Media.Ocr, ContentType = WindowsRuntime]
+$engine = [Windows.Media.Ocr.OcrEngine]::TryCreateFromUserProfileLanguages()
+if ($engine -eq $null) { Write-Output 'OCR_UNAVAILABLE'; exit 3 }
+$result = Await-Op ($engine.RecognizeAsync($bmp)) ([Windows.Media.Ocr.OcrResult])
+foreach ($line in $result.Lines) {
+    $words = @($line.Words)
+    if ($words.Count -eq 0) { continue }
+    $x0 = ($words | ForEach-Object { $_.BoundingRect.X } | Measure-Object -Minimum).Minimum
+    $y0 = ($words | ForEach-Object { $_.BoundingRect.Y } | Measure-Object -Minimum).Minimum
+    $x1 = ($words | ForEach-Object { $_.BoundingRect.X + $_.BoundingRect.Width } | Measure-Object -Maximum).Maximum
+    $y1 = ($words | ForEach-Object { $_.BoundingRect.Y + $_.BoundingRect.Height } | Measure-Object -Maximum).Maximum
+    $cx = [int](($x0 + $x1) / 2)
+    $cy = [int](($y0 + $y1) / 2)
+    $text = ($words | ForEach-Object { $_.Text }) -join ' '
+    Write-Output ("{0} | {1},{2}" -f $text, $cx, $cy)
+}
+"""
+
+
+def _run_powershell_ocr(image_path: str) -> list[str]:
+    """Run the fixed OCR script over a PNG; return raw 'text | x,y' lines.
+
+    Module-level so tests can feed canned lines. The image path is passed
+    as a process argument ($args[0]); nothing is interpolated into the
+    script body.
+    """
+    encoded = base64.b64encode(_OCR_SCRIPT.encode("utf-16-le")).decode("ascii")
+    proc = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive",
+         "-EncodedCommand", encoded, image_path],
+        capture_output=True, text=True, timeout=30)
+    if proc.returncode != 0:
+        raise ActionFailedError(
+            f"Windows OCR failed (exit {proc.returncode}): "
+            f"{proc.stderr.strip()[:200]}")
+    return [ln for ln in proc.stdout.splitlines() if ln.strip()]
+
+
+_OCR_LINE_RE = re.compile(r"^(?P<text>.+?)\s*\|\s*(?P<x>\d+)\s*,\s*(?P<y>\d+)\s*$")
+
+
+def parse_ocr_lines(lines: list[str]) -> list[dict]:
+    """Parse 'line text | cx,cy' OCR output into {text, x, y} entries."""
+    out: list[dict] = []
+    for raw in lines:
+        m = _OCR_LINE_RE.match(raw.strip())
+        if not m:
+            continue
+        out.append({"text": m.group("text").strip(),
+                    "x": int(m.group("x")), "y": int(m.group("y"))})
+    return out
+
+
+def _word_set(text: str) -> set[str]:
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w}
+
+
+def match_ocr_text(entries: list[dict], query: str) -> list[dict]:
+    """Score OCR entries against a query.
+
+    Exact case-insensitive substring = 1.0. Otherwise word overlap
+    (query words present in the line / query words), kept when >= 0.5.
+    Sorted best-first. Each returned entry gains a 'score' key.
+    """
+    q = query.strip().lower()
+    if not q:
+        return []
+    qwords = _word_set(query)
+    scored: list[dict] = []
+    for e in entries:
+        if q in e["text"].lower():
+            score = 1.0
+        elif qwords:
+            overlap = len(qwords & _word_set(e["text"])) / len(qwords)
+            score = round(overlap, 3)
+        else:
+            score = 0.0
+        if score >= 0.5:
+            scored.append({**e, "score": score})
+    scored.sort(key=lambda d: (-d["score"], d["y"], d["x"]))
+    return scored
+
+
+# --------------------------------------------------------------------------- #
 # PCController
 # --------------------------------------------------------------------------- #
 
@@ -537,12 +797,29 @@ class PCController:
     def __init__(self, backend: Optional[UiaBackend] = None,
                  session_store: Any = None,
                  session_id: Optional[str] = None,
-                 allowed_commands: Optional[list[str]] = None) -> None:
+                 allowed_commands: Optional[list[str]] = None,
+                 data_dir: Optional[str | Path] = None,
+                 app_registry: Optional[AppRegistry] = None,
+                 grounder: Optional[Callable] = None,
+                 verifier: Optional[Callable] = None) -> None:
         self.backend: UiaBackend = backend or WindowsUiaBackend()
         self.store = session_store
         self.session_id = session_id
+        # Vision grounding (Team 18): injected callables, see grounding.py
+        # for the signatures. None = no grounder configured — ground_target
+        # then answers honestly instead of inventing coordinates.
+        self.grounder = grounder
+        self.verifier = verifier
         # Optional command allowlist: prefixes the shell command must match.
         self.allowed_commands = allowed_commands
+        # Launch-ladder learned registry: explicit instance wins; else a
+        # SQLite file in data_dir; else disabled (ladder rungs 2-3 still run).
+        if app_registry is not None:
+            self.app_registry: Optional[AppRegistry] = app_registry
+        elif data_dir is not None:
+            self.app_registry = AppRegistry(Path(data_dir) / "app_registry.db")
+        else:
+            self.app_registry = None
         self._snapshot_seq = 0
         self._last_snapshot: Optional[Snapshot] = None
         self._lock = threading.Lock()
@@ -672,20 +949,201 @@ class PCController:
         self._log("pc.key", {"key": k}, trust="tool_verified")
         return {"ok": True, "detail": f"pressed {k}"}
 
+    # -- app launch ladder (tier-2) --------------------------------------- #
+    def _scan_start_menu(self, name: str) -> Optional[str]:
+        """Rung 2: find a Start Menu .lnk whose name matches. Best = exact."""
+        needle = " ".join(name.strip().lower().split())
+        exact: Optional[str] = None
+        partial: Optional[str] = None
+        for d in _start_menu_dirs():
+            if not d.is_dir():
+                continue
+            for lnk in d.rglob("*.lnk"):
+                stem = lnk.stem.strip().lower()
+                if stem == needle and exact is None:
+                    exact = str(lnk)
+                elif needle in stem and partial is None:
+                    partial = str(lnk)
+        return exact or partial
+
+    def launch_app(self, name: str) -> dict:
+        """Tier-2. Launch an app by NAME. No hardcoded exe paths.
+
+        Ladder: (1) learned SQLite registry, (2) Start Menu .lnk scan,
+        (3) PATH lookup (shutil.which). Every success teaches the registry.
+        """
+        clean = name.strip()
+        if not clean:
+            raise ActionFailedError("refusing to launch an empty app name")
+
+        def _started(path: str, via: str) -> dict:
+            _launch_target(path)
+            if self.app_registry is not None:
+                self.app_registry.learn(clean, path)
+            self._log("pc.launch_app",
+                      {"name": clean, "path": str(path), "via": via},
+                      trust="tool_verified")
+            return {"ok": True, "via": via, "path": str(path),
+                    "detail": f"launched {clean!r} via {via}"}
+
+        # Rung 1: the learned registry.
+        if self.app_registry is not None:
+            known = self.app_registry.lookup(clean)
+            if known and Path(known).exists():
+                return _started(known, "registry")
+
+        # Rung 2: Start Menu catalog.
+        lnk = self._scan_start_menu(clean)
+        if lnk is not None:
+            return _started(lnk, "start_menu")
+
+        # Rung 3: PATH.
+        found = shutil.which(clean)
+        if found:
+            return _started(found, "path")
+
+        raise ActionFailedError(
+            f"could not find an app named {clean!r} (checked learned "
+            f"registry, Start Menu, and PATH) — refusing to guess")
+
+    # -- OCR fallback read (tier-1) ------------------------------------------- #
+    def find_text_on_screen(self, text: str) -> dict:
+        """Tier-1 read: find on-screen text via the OS OCR when the UIA
+        tree cannot see it (games, canvas apps, remote desktops).
+
+        RAM-only screenshot -> temp PNG (WinRT OCR needs a file path;
+        deleted immediately after) -> fixed PowerShell script with the path
+        as $args[0] (never interpolated) -> 'text | x,y' lines parsed and
+        matched in Python. Non-Windows returns an honest unavailable result.
+        """
+        query = text.strip()
+        if not query:
+            raise ActionFailedError("refusing to OCR-search an empty string")
+        if not _is_windows():
+            return {"ok": False, "available": False, "found": False,
+                    "matches": [],
+                    "reason": "OCR fallback is Windows-only "
+                              "(Windows.Media.Ocr)"}
+        w, h, rgb = self.backend.capture_pixels(None)
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        try:
+            tmp.write(encode_png(w, h, rgb))
+            tmp.close()
+            raw = _run_powershell_ocr(tmp.name)
+        finally:
+            try:
+                os.unlink(tmp.name)
+            except OSError:
+                pass
+        if raw[:1] == ["OCR_UNAVAILABLE"]:
+            return {"ok": False, "available": False, "found": False,
+                    "matches": [],
+                    "reason": "Windows OCR engine unavailable for the "
+                              "current user profile languages"}
+        entries = parse_ocr_lines(raw)
+        matches = match_ocr_text(entries, query)
+        best = matches[0] if matches else None
+        self._log("pc.find_text",
+                  {"query": query[:80], "lines_seen": len(entries),
+                   "matches": len(matches)},
+                  trust="tool_untrusted")  # screen text is untrusted
+        return {"ok": True, "available": True, "found": best is not None,
+                "best": best, "matches": matches,
+                "lines_seen": len(entries)}
+
+    # -- vision grounding cascade (tier-1 read; Team 18 steal #1) ------------ #
+    def ground_target(self, query: str, *,
+                      grounder: Optional[Callable] = None,
+                      verifier: Optional[Callable] = None) -> dict:
+        """Tier-1 read: locate `query` by vision — full-view ground ->
+        3.5x crop -> re-ground -> project back -> verifier gate
+        (jarvis/grounding.py). PROPOSES a point; never clicks.
+
+        The per-call callables win over the controller's configured ones.
+        No grounder anywhere -> an honest "no grounder configured" result
+        with NO point: a fabricated coordinate is worse than none. The
+        screenshot is used for its dimensions only and stays in RAM.
+        """
+        q = query.strip()
+        if not q:
+            raise ActionFailedError("refusing to ground an empty query")
+        fn = grounder if grounder is not None else self.grounder
+        if fn is None:
+            return {"ok": False, "available": False, "found": False,
+                    "clickable": False, "verified": False, "point": None,
+                    "reason": "no grounder configured",
+                    "detail": "vision grounding needs a grounder callable "
+                              "(cloud VLM or local grounding model); none "
+                              "is configured — use pc.observe / "
+                              "pc.find_text instead"}
+        vf = verifier if verifier is not None else self.verifier
+        w, h, _rgb = self.backend.capture_pixels(None)  # RAM only
+        result = _ground_cascade((w, h), q, fn, vf)
+        self._log("pc.ground",
+                  {"query": q[:80], "found": result.found,
+                   "clickable": result.clickable, "reason": result.reason},
+                  trust="tool_untrusted")  # screen content is untrusted
+        return {"ok": True, "available": True, **result.to_dict()}
+
+    def click_grounded(self, result: Any) -> dict:
+        """Tier-2. Click a vision-grounded point — VERIFIED points only.
+
+        The verifier law (Team 18): first-look grounding is wrong ~40% of
+        the time even for the best models, so an unverified vision target
+        is REFUSED here, at the click path itself. UIA targets are exempt
+        by construction: they never come through this function —
+        click_element resolves them by snapshot identity instead.
+        Accepts a GroundResult or its dict form (ground_target's return).
+        """
+        if isinstance(result, GroundResult):
+            clickable, reason = result.clickable, result.reason
+            point, query = result.point, result.query
+        elif isinstance(result, Mapping):
+            clickable = bool(result.get("clickable"))
+            reason = str(result.get("reason", "unverified"))
+            point = result.get("point")
+            query = str(result.get("query", ""))
+        else:
+            raise ActionFailedError(
+                f"click_grounded needs a GroundResult, got "
+                f"{type(result).__name__}")
+        if not clickable or not point:
+            raise ActionFailedError(
+                f"refusing to click vision target {query!r}: "
+                f"{reason} — only verifier-confirmed groundings may be "
+                f"clicked; UIA elements use click_element")
+        x, y = int(point[0]), int(point[1])
+        self.backend.click_at(x, y)
+        self._log("pc.click",
+                  {"provenance": "vision", "query": query[:80],
+                   "point": [x, y]},
+                  trust="tool_verified")
+        return {"ok": True, "provenance": "vision", "point": [x, y],
+                "detail": f"clicked verified vision target {query!r} "
+                          f"at ({x}, {y})"}
+
     # -- terminal (tier-3 ALWAYS; separate function — C-X4) ------------------ #
     def run_in_terminal(self, command: str) -> dict:
         """Tier-3, always. NEVER tier-2.
 
         C-X4: this is a DIFFERENT function from type_into_field with no
         shared helper. Commands go to a shell; text never does.
+
+        The deciding guard is jarvis.shell_guard.check_command with the
+        legacy blocklist injected as its first layer: the raw-string
+        blocklist runs FIRST (its reason strings preserved), then the
+        tokenised guard screens what regexes cannot see (quoting,
+        substitution, long-flag spellings). Either layer may block.
         """
-        why = _check_blocklist(command)
-        if why:
+        verdict = _shell_guard_check(command, legacy_check=_check_blocklist)
+        if verdict.blocked:
             self._log("pc.shell_blocked",
-                      {"command": command[:200], "reason": why},
+                      {"command": command[:200], "reason": verdict.reason,
+                       "rule": verdict.rule},
                       trust="tool_verified")
             raise BlockedCommandError(
-                f"refusing blocklisted command ({why}): {command[:80]}")
+                f"refusing blocklisted command ({verdict.reason}): "
+                f"{command[:80]}")
         if self.allowed_commands is not None:
             if not any(command.strip().startswith(p)
                        for p in self.allowed_commands):

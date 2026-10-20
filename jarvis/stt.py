@@ -34,6 +34,8 @@ __all__ = [
     "SAMPLE_RATE", "FRAME_MS", "HANGOVER_MS", "MIN_SPEECH_MS",
     "vad_segments",
     "Transcriber", "StubTranscriber", "FasterWhisperTranscriber",
+    "HinglishTranscriber", "TranscriberChain", "create_transcriber",
+    "DEFAULT_HINGLISH_MODEL", "HINGLISH_PRIME_MODEL",
     "WakeListener", "StubWake", "OpenWakeWordListener",
     "MicStream",
 ]
@@ -198,17 +200,25 @@ class FasterWhisperTranscriber(Transcriber):
 
     Defaults: `small` model, INT8 compute (the 2060 spec pick). vad_filter
     is OFF by construction — the energy VAD above is the single VAD
-    (spec M-V11). Language auto-detects; Hinglish reports the dominant
-    language as detected by the model.
+    (spec M-V11). Language auto-detects unless `language=` pins it;
+    Hinglish reports the dominant language as detected by the model.
+
+    ``RESULT_LANGUAGE``: when a subclass sets it, the result's language
+    tag is that value instead of the model's detected language (the
+    Hinglish engine knows its output script better than the detector).
     """
+
+    RESULT_LANGUAGE: Optional[str] = None
 
     def __init__(self, model_name: str = "small",
                  compute_type: str = "int8", device: str = "auto",
-                 vad_filter: bool = False) -> None:
+                 vad_filter: bool = False,
+                 language: Optional[str] = None) -> None:
         self._model_name = model_name
         self._compute_type = compute_type
         self._device = device
         self._vad_filter = vad_filter
+        self._language = language
         self._model: Any = None
 
     def _load(self) -> None:
@@ -220,9 +230,17 @@ class FasterWhisperTranscriber(Transcriber):
             raise STTError(
                 "faster-whisper is not installed. "
                 "Install it with: pip install faster-whisper") from exc
-        self._model = WhisperModel(
-            self._model_name, device=self._device,
-            compute_type=self._compute_type)
+        try:
+            self._model = WhisperModel(
+                self._model_name, device=self._device,
+                compute_type=self._compute_type)
+        except Exception as exc:
+            # Missing/unconverted weights, no network, bad repo id — all
+            # surface as ONE typed error so chains can fall through and
+            # callers never see a raw huggingface/ctranslate traceback.
+            raise STTError(
+                f"could not load speech model {self._model_name!r}: "
+                f"{type(exc).__name__}: {exc}") from exc
 
     def transcribe(self, pcm_bytes: bytes,
                    sample_rate: int = SAMPLE_RATE) -> Dict[str, Any]:
@@ -235,18 +253,134 @@ class FasterWhisperTranscriber(Transcriber):
         audio = _resample_linear(audio, sample_rate, SAMPLE_RATE)
 
         segments, info = self._model.transcribe(
-            audio, language=None, vad_filter=self._vad_filter)
+            audio, language=self._language, vad_filter=self._vad_filter)
         texts: List[str] = []
         logprobs: List[float] = []
         for seg in segments:
             texts.append(seg.text)
             logprobs.append(seg.avg_logprob)
         text = " ".join("".join(texts).split())
-        language = getattr(info, "language", None) or "unknown"
+        language = self.RESULT_LANGUAGE or (
+            getattr(info, "language", None) or "unknown")
         confidence = (sum(math.exp(min(lp, 0.0)) for lp in logprobs)
                       / len(logprobs)) if logprobs else 0.0
         return {"text": text, "language": language,
                 "confidence": round(confidence, 4)}
+
+
+# --------------------------------------------------------------------------- #
+# Hinglish engine — Oriserve Whisper-Hindi2Hinglish (team17's top steal).
+#
+# The only open model family trained FOR roman-script Hinglish output:
+# on Oriserve's evals it roughly halves stock Whisper-Large-v3's WER on
+# conversational Hinglish (team17-indic.md §1.1; numbers are the vendor's
+# own [MC]). Roman output is the point: it is what the owner types, what
+# the LLM reads best, and what jarvis.translit canonicalizes downstream.
+# Transcripts are tagged "hi-Latn" (Hindi, Latin script) — never plain
+# "hi", which downstream code reads as Devanagari Hindi.
+#
+# Weights are downloaded on the OWNER's PC via setup — never here:
+#   Oriserve/Whisper-Hindi2Hinglish-Swift   ~0.29 GB  (default, always-on)
+#   Oriserve/Whisper-Hindi2Hinglish-Prime   ~6.17 GB files (~1.6 GB VRAM
+#                                           as CT2 int8; dictation tier)
+# faster-whisper needs CTranslate2-format weights: if the hub repo lacks
+# them, WhisperModel raises, _load() wraps it as STTError naming the
+# model, and a TranscriberChain falls through to plain whisper — honest
+# degradation, never a crash, never a silent fake.
+# --------------------------------------------------------------------------- #
+DEFAULT_HINGLISH_MODEL = "Oriserve/Whisper-Hindi2Hinglish-Swift"
+HINGLISH_PRIME_MODEL = "Oriserve/Whisper-Hindi2Hinglish-Prime"
+
+
+class HinglishTranscriber(FasterWhisperTranscriber):
+    """Hinglish-first STT: Oriserve Hindi2Hinglish via faster-whisper.
+
+    Decoding is pinned to language="hi" (the model is Hindi-specific;
+    auto-detect only wastes its strength). Output text is roman-script
+    Hinglish; the result language tag is "hi-Latn".
+    """
+
+    RESULT_LANGUAGE = "hi-Latn"
+
+    def __init__(self, model_name: str = DEFAULT_HINGLISH_MODEL,
+                 compute_type: str = "int8", device: str = "auto",
+                 language: Optional[str] = "hi") -> None:
+        super().__init__(model_name=model_name, compute_type=compute_type,
+                         device=device, vad_filter=False, language=language)
+
+
+class TranscriberChain(Transcriber):
+    """Ordered fallback: try each backend, degrade loudly, never crash.
+
+    A backend that raises STTError (missing dep, missing weights) is
+    marked dead for the chain's lifetime — a missing model must not be
+    re-attempted (and re-download-checked) on every utterance. Every
+    fall-through prints WHY to stderr; the chain never pretends a lesser
+    engine is the one that was asked for. ``active_name`` reports which
+    backend produced the last transcript (None before any success).
+    """
+
+    def __init__(self, backends: List[Tuple[str, Transcriber]]) -> None:
+        if not backends:
+            raise STTError("TranscriberChain needs at least one backend")
+        self._backends = list(backends)
+        self._dead: set = set()
+        self.active_name: Optional[str] = None
+
+    @property
+    def backend_names(self) -> List[str]:
+        return [name for name, _ in self._backends]
+
+    def transcribe(self, pcm_bytes: bytes,
+                   sample_rate: int = SAMPLE_RATE) -> Dict[str, Any]:
+        if not pcm_bytes:
+            raise STTError("no audio provided")
+        failures: List[str] = []
+        for name, backend in self._backends:
+            if name in self._dead:
+                continue
+            try:
+                result = backend.transcribe(pcm_bytes, sample_rate)
+            except STTError as exc:
+                self._dead.add(name)
+                failures.append(f"{name}: {exc}")
+                print(f"[stt] engine {name!r} unavailable ({exc}) — "
+                      f"falling through to the next engine.",
+                      file=sys.stderr)
+                continue
+            self.active_name = name
+            return result
+        raise STTError(
+            "all speech engines failed: " + "; ".join(failures))
+
+
+def create_transcriber(engine: str = "auto",
+                       hinglish_model: str = DEFAULT_HINGLISH_MODEL,
+                       whisper_model: str = "small") -> Transcriber:
+    """Build a transcriber by engine name. The STT mirror of tts.pick_engine.
+
+    "auto" (default): the chain hinglish -> whisper -> stub, in that
+    order — the Hinglish engine when its weights are on the machine,
+    stock whisper when they are not, the LOUD stub only when no real
+    engine exists at all. Explicit names return exactly that engine and
+    fail loudly (typed STTError) when it is unavailable — never a silent
+    downgrade. Unknown names raise STTError.
+    """
+    if engine == "hinglish":
+        return HinglishTranscriber(model_name=hinglish_model)
+    if engine == "whisper":
+        return FasterWhisperTranscriber(model_name=whisper_model)
+    if engine == "stub":
+        return StubTranscriber()
+    if engine == "auto":
+        return TranscriberChain([
+            ("hinglish", HinglishTranscriber(model_name=hinglish_model)),
+            ("whisper", FasterWhisperTranscriber(model_name=whisper_model)),
+            ("stub", StubTranscriber()),
+        ])
+    raise STTError(
+        f"unknown STT engine: {engine!r} "
+        f"(expected 'auto', 'hinglish', 'whisper' or 'stub')")
 
 
 # --------------------------------------------------------------------------- #

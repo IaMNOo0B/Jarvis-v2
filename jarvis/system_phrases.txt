@@ -1,0 +1,32 @@
+# Built-in system / PC-control phrases (grammar: jarvis/intent_router.py).
+# There is no skills/system directory; this table ships with the router.
+# Loaded by the wiring layer with skill name "system".
+#
+# VIRTUAL TOOLS: these names are INTENT NAMES, not pc.* tools — the grammar
+# cannot emit screen coordinates. The wiring layer (chat.py) must bind them:
+#
+#   system.observe_screen   -> pc.observe (tier-1, instant)
+#   system.take_screenshot  -> pc.screenshot (tier-1)
+#   system.launch_app{app}  -> pc.observe to find the app, then pc.click_element
+#                              (tier-2 gate on the click, not on the words)
+#   system.close_thing      -> pc.press_key(Alt+F4) or Escape (tier-2, gated)
+#
+# Destructive actions deliberately stay FUZZY-ONLY in practice: wiring must
+# NEVER auto-execute system.close_thing / system.launch_app on any router
+# Match without the normal tier-2 gate — the words are cheap, the click is
+# what costs.
+
+[ObserveScreen] screen pe kya hai -> observe_screen
+[ObserveScreen] what is on my screen -> observe_screen
+[ObserveScreen] screen dikhao -> observe_screen
+[TakeScreenshot] screenshot lo -> take_screenshot
+[TakeScreenshot] take a screenshot -> take_screenshot
+[TakeScreenshot] स्क्रीनशॉट लो -> take_screenshot
+[LaunchApp] {app} khol do -> launch_app
+[LaunchApp] {app} kholo -> launch_app
+[LaunchApp] {app} khol -> launch_app
+[LaunchApp] {app} open karo -> launch_app
+[LaunchApp] open {app} -> launch_app
+[CloseThing] band kar -> close_thing
+[CloseThing] ye band kar do -> close_thing
+[CloseThing] close it -> close_thing

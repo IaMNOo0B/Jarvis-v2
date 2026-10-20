@@ -20,6 +20,13 @@ Doctrine: when in doubt, ESCALATE the class. False positives cost annoyance
 (recoverable); false negatives cost leaks (irrecoverable). On ANY internal
 error the classifier fails CLOSED to SENSITIVE, never PUBLIC.
 
+Vault round-trip (Presidio/LLM-Guard pattern): substitute()/restore() swap
+SECRET and PERSONAL spans for stable placeholders (<SECRET_1>,
+<PERSONAL_1>, ...) so the model can reason about identity -- "is this the
+same key as before?" -- without the raw value ever leaving the machine.
+The placeholder -> value mapping lives in an in-memory Vault only: never
+logged, never persisted, never sent.
+
 Stdlib only: re, hashlib, hmac, base64, urllib.parse, os, json, time.
 """
 
@@ -33,6 +40,7 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import IntEnum
 from urllib.parse import unquote_plus
@@ -144,6 +152,34 @@ class SecretRegistry:
 def load_registry(path: str) -> SecretRegistry:
     """Load a persisted secret registry (salt + digests, never values)."""
     return SecretRegistry.load(path)
+
+
+# The registry's home inside the owner's data dir. Only salted HMAC-SHA256
+# digests + lengths are ever written -- a secret VALUE never touches disk.
+REGISTRY_FILENAME = "known_secrets.json"
+
+
+def registry_path(data_dir: str) -> str:
+    return os.path.join(data_dir, REGISTRY_FILENAME)
+
+
+def load_or_create_registry(data_dir: str) -> SecretRegistry:
+    """Load the data dir's registry, creating a fresh one if absent.
+
+    A corrupt registry file is quarantined to '<name>.corrupt' and a fresh
+    registry returned: startup must not die, but the owner should re-register
+    (the quarantine file is the visible evidence)."""
+    path = registry_path(data_dir)
+    if os.path.exists(path):
+        try:
+            return SecretRegistry.load(path)
+        except Exception:
+            try:
+                os.replace(path, path + ".corrupt")
+            except OSError:
+                pass
+            return SecretRegistry()
+    return SecretRegistry()
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +311,210 @@ _TIER_C_PATTERNS: list[tuple[str, re.Pattern, DataClass]] = [
 
 
 # ---------------------------------------------------------------------------
+# Placeholder round-trip -- the Vault (Team 16 steal #2; Presidio pattern,
+# code-confirmed via microsoft/presidio + LLM Guard's Anonymize/Vault)
+# ---------------------------------------------------------------------------
+#
+# redact() is one-way: the value is GONE from what the model sees, so the
+# model cannot reason about identity ("is that the same key as before?")
+# and a reply can never hand the value back to the user. The vault fixes
+# both:
+#
+#   substitute(text)     -> SECRET/PERSONAL spans become stable
+#                           placeholders (<SECRET_1>, <PERSONAL_1>, ...);
+#                           the Vault keeps placeholder -> original.
+#   restore(text, vault) -> placeholders in the model's reply are swapped
+#                           back to the originals before display.
+#
+# Scope (deliberate): substitute() vaults SECRET and PERSONAL spans only.
+# SENSITIVE spans pass through, exactly as redact() passes PERSONAL --
+# callers that must withhold SENSITIVE content still use redact().
+#
+# Two Presidio FP-reducers ride along, in THIS path only (classify()'s
+# behaviour and tests are untouched):
+#   1. validate() hooks -- a recognizer may attach a shape validator; a
+#      candidate that fails validation is NOT substituted (this is the
+#      hook that lets Presidio beat raw regex on false positives).
+#   2. Context boost -- a PERSONAL span near a label word ("key",
+#      "token", "password", "api") is handled as SECRET: a "password
+#      recovery email" is a credential path, not ordinary PII.
+
+_PLACEHOLDER_RE = re.compile(r"<(SECRET|PERSONAL)_(\d+)>")
+
+
+def _body_shape(body: str, lo: int, hi: int, charset: re.Pattern) -> bool:
+    """Length + charset shape check -- the stdlib stand-in for a checksum
+    validator where the format has no checksum to verify."""
+    return lo <= len(body) <= hi and charset.fullmatch(body) is not None
+
+
+_ALNUM_RE = re.compile(r"[A-Za-z0-9]+")
+_HEX_CHARS_RE = re.compile(r"[0-9a-fA-F]+")  # NOT _HEX_RE: that name is
+# the decode-then-scan blob finder above -- shadowing it floods the blob
+# cap with 1-2 char matches and silently disables encoded-secret scans.
+_TOKEN_CHARS_RE = re.compile(r"[A-Za-z0-9_\-]+")
+
+
+# Shape validators for the provider key fingerprints (llm_compat.py's
+# /key prefixes). Real keys: groq gsk_+52 alnum, openrouter sk-or-v1-+64
+# hex, nvidia nvapi-+~44 token chars, gemini AIza+35 (=39 total),
+# perplexity pplx-+~48 alnum, xai-+~48 alnum. Ranges are generous;
+# look-alikes (too short, wrong charset, wrong total length) fail.
+def _validate_groq_key(v: str) -> bool:
+    return v.startswith("gsk_") and _body_shape(v[4:], 40, 64, _ALNUM_RE)
+
+
+def _validate_openrouter_key(v: str) -> bool:
+    return (v.startswith("sk-or-v1-")
+            and _body_shape(v[len("sk-or-v1-"):], 32, 128, _HEX_CHARS_RE))
+
+
+def _validate_nvidia_key(v: str) -> bool:
+    return (v.startswith("nvapi-")
+            and _body_shape(v[len("nvapi-"):], 32, 128, _TOKEN_CHARS_RE))
+
+
+def _validate_gemini_key(v: str) -> bool:
+    return (v.startswith("AIza") and len(v) == 39
+            and _TOKEN_CHARS_RE.fullmatch(v[4:]) is not None)
+
+
+def _validate_perplexity_key(v: str) -> bool:
+    return (v.startswith("pplx-")
+            and _body_shape(v[len("pplx-"):], 32, 64, _ALNUM_RE))
+
+
+def _validate_xai_key(v: str) -> bool:
+    return (v.startswith("xai-")
+            and _body_shape(v[len("xai-"):], 32, 64, _ALNUM_RE))
+
+
+# Provider-key recognizers. These live ONLY in the substitution path:
+# classify() never sees them, so its recall-first doctrine is unchanged.
+# Each regex is deliberately loose (prefix + >=8 token chars) so that
+# near-miss look-alikes become candidates -- the attached validator is
+# what decides, exactly Presidio's recognizer/validate_result split.
+_PROVIDER_KEY_RECOGNIZERS: list[tuple[str, re.Pattern,
+                                      Callable[[str], bool]]] = [
+    ("provider-key-groq",
+     re.compile(r"\bgsk_[A-Za-z0-9_\-]{8,}"), _validate_groq_key),
+    ("provider-key-openrouter",
+     re.compile(r"\bsk-or-[A-Za-z0-9_\-]{8,}"), _validate_openrouter_key),
+    ("provider-key-nvidia",
+     re.compile(r"\bnvapi-[A-Za-z0-9_\-]{8,}"), _validate_nvidia_key),
+    ("provider-key-gemini",
+     re.compile(r"\bAIza[A-Za-z0-9_\-]{8,}"), _validate_gemini_key),
+    ("provider-key-perplexity",
+     re.compile(r"\bpplx-[A-Za-z0-9_\-]{8,}"), _validate_perplexity_key),
+    ("provider-key-xai",
+     re.compile(r"\bxai-[A-Za-z0-9_\-]{8,}"), _validate_xai_key),
+]
+
+# The validate() hook table, keyed by recognizer/finding pattern name.
+# Any candidate (from classify() findings OR the recognizers above) whose
+# pattern name appears here must pass its validator to be substituted.
+_PATTERN_VALIDATORS: dict[str, Callable[[str], bool]] = {
+    name: validate for name, _rx, validate in _PROVIDER_KEY_RECOGNIZERS
+}
+
+# Context boost: label words near a PERSONAL span raise its floor.
+_LABEL_WORD_RE = re.compile(r"(?i)\b(?:key|token|password|api)\b")
+_CONTEXT_CHARS_BEFORE = 48
+_CONTEXT_CHARS_AFTER = 32
+
+
+def _raised_class(text: str, start: int, end: int,
+                  cls: DataClass) -> DataClass:
+    """Context boost (substitution path ONLY). A PERSONAL span whose
+    surrounding words include a label word is handled as SECRET."""
+    if cls != DataClass.PERSONAL:
+        return cls
+    lo = max(0, start - _CONTEXT_CHARS_BEFORE)
+    hi = min(len(text), end + _CONTEXT_CHARS_AFTER)
+    if _LABEL_WORD_RE.search(text[lo:hi]):
+        return DataClass.SECRET
+    return cls
+
+
+class Vault:
+    """Placeholder -> original map for one substitution scope.
+
+    IN MEMORY ONLY: a Vault is never written to disk, never logged
+    (repr shows counts, never values), and is meant to be dropped when
+    the turn ends. The same value always maps to the same placeholder
+    within a vault, so the model can reason about identity ("that is
+    the same <SECRET_1> you mentioned") without seeing any value.
+
+    `unknown_seen` counts placeholders restore() met that this vault
+    never issued (model hallucinations): they pass through unchanged --
+    restore never invents a value and never crashes.
+
+    Known edge (shared with Presidio): literal placeholder-shaped text
+    (<SECRET_1>) typed by the user is indistinguishable from an issued
+    placeholder on the restore path.
+    """
+
+    def __init__(self) -> None:
+        self._values: dict[str, str] = {}       # placeholder -> original
+        self._by_value: dict[str, str] = {}     # original -> placeholder
+        self._counters: dict[DataClass, int] = {
+            DataClass.SECRET: 0, DataClass.PERSONAL: 0}
+        self.unknown_seen: int = 0
+
+    def placeholder_for(self, value: str, data_class: DataClass) -> str:
+        """The stable placeholder for `value`, minting one if needed."""
+        existing = self._by_value.get(value)
+        if existing is not None:
+            return existing
+        n = self._counters.get(data_class, 0) + 1
+        self._counters[data_class] = n
+        placeholder = f"<{data_class.name}_{n}>"
+        self._values[placeholder] = value
+        self._by_value[value] = placeholder
+        return placeholder
+
+    def lookup(self, placeholder: str) -> str | None:
+        return self._values.get(placeholder)
+
+    @property
+    def placeholders(self) -> list[str]:
+        """Issued placeholder names (names only -- never values)."""
+        return list(self._values)
+
+    def __contains__(self, placeholder: str) -> bool:
+        return placeholder in self._values
+
+    def __getitem__(self, placeholder: str) -> str:
+        return self._values[placeholder]
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def restore(self, text: str) -> str:
+        """Swap this vault's placeholders in `text` back to originals.
+        Unknown placeholders pass through unchanged and are counted."""
+        if not isinstance(text, str):
+            return text
+
+        def _sub(m: re.Match) -> str:
+            placeholder = m.group(0)
+            value = self._values.get(placeholder)
+            if value is None:
+                self.unknown_seen += 1
+                return placeholder
+            return value
+
+        return _PLACEHOLDER_RE.sub(_sub, text)
+
+    def __repr__(self) -> str:
+        counts = ", ".join(
+            f"{cls.name}={n}" for cls, n in sorted(
+                self._counters.items(), key=lambda kv: kv[0].value) if n)
+        return (f"<Vault: {len(self)} placeholders ({counts or 'none'}), "
+                f"unknown_seen={self.unknown_seen}>")
+
+
+# ---------------------------------------------------------------------------
 # The DCL
 # ---------------------------------------------------------------------------
 
@@ -350,6 +590,93 @@ class DCL:
             pos = end
         out.append(text[pos:])
         return "".join(out), findings
+
+    def substitute(self, text: str,
+                   vault: Vault | None = None) -> tuple[str, Vault]:
+        """Reversible redaction (Presidio vault pattern).
+
+        Every SECRET/PERSONAL span is replaced by a stable placeholder
+        (<SECRET_1>, <PERSONAL_1>, ... -- numbered per class in order of
+        first appearance; the SAME value always gets the SAME placeholder
+        within a vault, so the model can reason about identity). Returns
+        (clean_text, vault); pass the vault to restore() on the reply
+        path. Pass an existing `vault` to keep numbering/dedup coherent
+        across several texts (e.g. every message of one brain turn).
+
+        SENSITIVE spans pass through unchanged (see the section header).
+        Fail-closed like classify(): any internal error falls back to
+        one-way redact() output, so a substitution bug can never leak.
+        """
+        v = vault if vault is not None else Vault()
+        if not isinstance(text, str):
+            return text, v
+        try:
+            spans = self._substitution_candidates(text)
+            if not spans:
+                return text, v
+            # Effective class per distinct value: the highest class any
+            # occurrence earned (context boost included), so one value
+            # never wears two placeholders of different classes.
+            best: dict[str, DataClass] = {}
+            order: list[str] = []
+            for start, end, cls in spans:
+                value = text[start:end]
+                if value not in best:
+                    best[value] = cls
+                    order.append(value)
+                elif cls > best[value]:
+                    best[value] = cls
+            for value in order:
+                v.placeholder_for(value, best[value])
+            out: list[str] = []
+            pos = 0
+            for start, end, _cls in spans:
+                out.append(text[pos:start])
+                out.append(v.placeholder_for(text[start:end],
+                                             best[text[start:end]]))
+                pos = end
+            out.append(text[pos:])
+            return "".join(out), v
+        except Exception:
+            redacted, _ = self.redact(text)
+            return redacted, v
+
+    def _substitution_candidates(
+            self, text: str) -> list[tuple[int, int, DataClass]]:
+        """Merged (start, end, class) spans substitute() will vault.
+
+        Sources: (a) SECRET/PERSONAL findings from classify(), filtered
+        by any validate() hook registered for their pattern and raised
+        by the context boost; (b) the provider-key recognizers, which
+        exist only in this path. Overlaps merge with the highest class
+        winning, exactly as in redact()."""
+        spans: list[tuple[int, int, DataClass]] = []
+        _, findings = self.classify(text)
+        for f in findings:
+            if f.data_class not in (DataClass.SECRET, DataClass.PERSONAL):
+                continue
+            validate = _PATTERN_VALIDATORS.get(f.pattern.split("@")[0])
+            if validate is not None and not validate(text[f.start:f.end]):
+                continue  # validate() hook: look-alike, do not substitute
+            spans.append((f.start, f.end,
+                          _raised_class(text, f.start, f.end, f.data_class)))
+        for _name, rx, validate in _PROVIDER_KEY_RECOGNIZERS:
+            for m in rx.finditer(text):
+                if validate(m.group(0)):
+                    spans.append((m.start(), m.end(), DataClass.SECRET))
+        spans.sort(key=lambda s: (s[0], -(s[1] - s[0])))
+        merged: list[list] = []
+        for start, end, cls in spans:
+            if end <= start:
+                continue
+            if merged and start < merged[-1][1]:
+                prev = merged[-1]
+                prev[1] = max(prev[1], end)
+                if cls > prev[2]:
+                    prev[2] = cls
+            else:
+                merged.append([start, end, cls])
+        return [(s, e, c) for s, e, c in merged]
 
     def feed_entry(self, destination: str,
                    items: list[dict],
@@ -442,6 +769,17 @@ class DCL:
             decoded = _try_decode(kind, blob)
             if decoded is None:
                 continue
+            # Tier A applies to decoded layers too: a REGISTERED secret does
+            # not stop being a secret because someone base64'd it. (Before
+            # this, decode-then-scan only re-ran Tier B patterns, so an
+            # encoded registered secret sailed past the registry.)
+            for f in self.registry.find_matches(decoded):
+                findings.append(Finding(
+                    DataClass.SECRET, "A",
+                    f"{f.pattern}@encoded-{kind}-L{depth + 1}",
+                    start, end,
+                    detail=f"registered secret found in {kind}-decoded "
+                           f"layer {depth + 1}"))
             sub = self._tier_b(decoded, depth + 1)
             for f in sub:
                 # Remap onto the original encoded blob's span.
@@ -466,10 +804,99 @@ class DCL:
 
 
 # ---------------------------------------------------------------------------
+# Egress audit -- the durable "what left the machine" feed (P1-13, L341)
+# ---------------------------------------------------------------------------
+
+EGRESS_EVENT_TYPE = "dcl.egress"
+
+
+def record_egress(store, session_id: str, destination: str,
+                  data_class, action: str = "sent", byte_count: int = 0,
+                  source: str = "chat") -> str | None:
+    """Append one dcl.egress event to the session store. METADATA ONLY (via
+    feed_entry): timestamp, class, destination, byte count, action -- the
+    content itself is never recorded, by construction.
+
+    Returns the event_id, or None if recording failed. Recording is audit:
+    it must never raise into the egress path it observes."""
+    try:
+        entry = _default_dcl.feed_entry(
+            destination,
+            [{"data_class": data_class, "source": source,
+              "byte_count": byte_count, "action": action}],
+            source=source)[0]
+        return store.emit(session_id, EGRESS_EVENT_TYPE, entry,
+                          actor="system", trust="system")
+    except Exception:
+        return None
+
+
+def make_egress_sink(store, session_id: str, source: str = "chat"):
+    """Build the callable Gate(egress_sink=...) expects: one metadata dict
+    in, one dcl.egress event out. Bridges the gate to the session store."""
+    def _sink(entry: dict) -> None:
+        record_egress(store, session_id,
+                      str(entry.get("destination", "unknown")),
+                      str(entry.get("class", "PUBLIC")),
+                      action=str(entry.get("action", "sent")),
+                      byte_count=int(entry.get("byte_count", 0)),
+                      source=source)
+    return _sink
+
+
+def what_left(store, limit: int = 50,
+              session_id: str | None = None) -> list[tuple]:
+    """The audit reader: the last `limit` egress events as
+    (timestamp, classification, destination) tuples, chronological order.
+
+    With session_id, reads that session's events from the store. Without
+    one, scans the store's JSONL spillover (its durable cross-session copy)
+    so the answer spans sessions. Metadata only -- there is no content in
+    these events to leak."""
+    payloads: list[tuple] = []  # (envelope_ts, payload)
+    if session_id is not None:
+        for ev in store.get_events(session_id, limit=1_000_000):
+            if ev.get("type") == EGRESS_EVENT_TYPE:
+                payloads.append((ev.get("ts"), ev.get("payload") or {}))
+    else:
+        import glob as _glob
+        for path in sorted(_glob.glob(
+                os.path.join(store.dir, "sessions-*.jsonl"))):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        try:
+                            env = json.loads(line)
+                        except ValueError:
+                            continue
+                        if env.get("type") == EGRESS_EVENT_TYPE:
+                            payloads.append(
+                                (env.get("ts"), env.get("payload") or {}))
+            except OSError:
+                continue
+    out: list[tuple] = []
+    for env_ts, p in payloads[-limit:] if limit > 0 else []:
+        out.append((p.get("ts", env_ts), p.get("class", ""),
+                    p.get("destination", "")))
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Module-level convenience API (backed by a default DCL instance)
 # ---------------------------------------------------------------------------
 
 _default_dcl = DCL()
+_default_registry_path: str | None = None
+
+
+def configure_registry(data_dir: str) -> SecretRegistry:
+    """Point the module-level DCL at the data dir's persisted registry and
+    make future register_secret() calls persist immediately. Returns the
+    registry in use."""
+    global _default_registry_path
+    _default_dcl.registry = load_or_create_registry(data_dir)
+    _default_registry_path = registry_path(data_dir)
+    return _default_dcl.registry
 
 
 def classify(text: str) -> tuple[DataClass, list[Finding]]:
@@ -482,10 +909,34 @@ def redact(text: str,
     return _default_dcl.redact(text, findings)
 
 
+def substitute(text: str,
+               vault: Vault | None = None) -> tuple[str, Vault]:
+    """Module-level substitute() on the default DCL. See DCL.substitute."""
+    return _default_dcl.substitute(text, vault)
+
+
+def restore(text: str, vault: Vault | None) -> str:
+    """Swap placeholders in `text` back to `vault`'s originals.
+
+    Unknown placeholders (never issued by this vault) pass through
+    unchanged and bump vault.unknown_seen. A None vault is a no-op."""
+    if vault is None or not isinstance(text, str):
+        return text
+    return vault.restore(text)
+
+
 def feed_entry(destination: str, items: list[dict],
                source: str = "chat") -> list[dict]:
     return _default_dcl.feed_entry(destination, items, source)
 
 
 def register_secret(name: str, value: str) -> None:
+    """Register a secret with the default DCL. If configure_registry() has
+    run, the registry (digests only) is persisted to the data dir at once,
+    so the registration survives restarts."""
     _default_dcl.register_secret(name, value)
+    if _default_registry_path is not None:
+        try:
+            _default_dcl.registry.save(_default_registry_path)
+        except OSError:
+            pass  # in-memory registration still protects this process

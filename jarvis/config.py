@@ -626,6 +626,21 @@ class Config:
         """Export safe for logs: secret-looking values replaced."""
         return redact_for_log(self.export(), self.secrets.keys)
 
+    def is_enabled(self, flag: str, default: bool = False) -> bool:
+        """Feature-flag / kill-switch lookup in the ``flags`` section.
+
+        Returns the flag's value when it is a literal bool in the file;
+        anything else (absent, wrong type) yields ``default`` — an absent
+        flag is always the fail-safe the caller chose, never a guess.
+        Evaluation is local and in-memory: this never blocks a turn.
+        """
+        flags = self.get("flags")
+        if isinstance(flags, dict):
+            value = flags.get(flag)
+            if isinstance(value, bool):
+                return value
+        return default
+
     # -- writing ---------------------------------------------------------
 
     def save(self) -> None:
@@ -740,4 +755,11 @@ def default_schema() -> dict:
             "watching_eyes": Field(bool, False),
             "watch_interval_sec": Field(int, 60, min=5, max=3600),
         },
+        # Owner kill-switches (Team 19 E1: flags-as-files). A flat dict of
+        # flag name -> bool; names are dotted by convention, e.g.
+        # "skill.finance": false or "tool.code_run": false. Absent flag =
+        # the caller's default (fail-safe); only a literal false disables.
+        # The gate consults these at dispatch — a bad feature dies by
+        # flipping one boolean here, not by file surgery on the skill.
+        "flags": Field(dict, {}),
     }

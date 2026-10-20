@@ -1,0 +1,60 @@
+# =====================================================================
+# jarvis-spec — JARVIS v2's Ollama model: Qwen2.5-7B + speculative
+# decoding via a 0.5B draft model. Researched in megascan team12
+# (inference study); every fact below traces to that report.
+#
+# WHAT THIS BUYS: the small DRAFT model guesses the next tokens, the
+# big model verifies them in ONE parallel pass. Answers are IDENTICAL
+# (the output distribution is unchanged) — only faster. JARVIS's
+# output is mostly tool-call JSON and short factual answers, which is
+# the highest-acceptance workload class for speculation.
+#
+# HONEST NOTE: the speedup figures (measured elsewhere: 24 -> 58
+# tok/s, 2.4x on code tasks; JARVIS-realistic estimate 1.5-2.2x) are
+# [MC] — NOT measured on the owner's RTX 2060 yet. Bench on-card
+# (ollama run jarvis-spec, watch tok/s) before believing any number.
+#
+# ---------------------------------------------------------------------
+# OWNER SETUP (one time, on the PC — paths are PLACEHOLDERS, fix them):
+#
+#   1. Download BOTH GGUF files (same family REQUIRED — the draft must
+#      share the target's tokenizer/vocabulary or Ollama rejects it):
+#        qwen2.5-7b-instruct-q4_k_m.gguf    (target, ~4.7 GB)
+#        qwen2.5-0.5b-instruct-q4_k_m.gguf  (draft,  ~0.4 GB)
+#      e.g. from the Qwen2.5 GGUF repos on Hugging Face.
+#   2. Edit the two paths below to where YOU saved the files.
+#      !!! DRAFT must be a LOCAL FILE PATH. A registry name like
+#      "qwen2.5:0.5b" is NOT accepted on the DRAFT line. !!!
+#   3. In this folder:   ollama create jarvis-spec -f jarvis-spec.Modelfile
+#   4. Point JARVIS at it: model name "jarvis-spec" in Settings/Ollama.
+#   5. Flash attention is a SERVER setting, not a Modelfile one: start
+#      Ollama with OLLAMA_FLASH_ATTENTION=1 (worth +19% generation and
+#      up to +228% prompt processing on the 2060 class; also REQUIRED
+#      if KV-cache quantization is ever enabled).
+#
+# ---------------------------------------------------------------------
+# VRAM MATH (RTX 2060, 6 GB — kill-line 5.5 GB usable):
+#   7B Q4_K_M weights ............ 4.70 GB
+#   KV cache, f16, num_ctx 4096 ... 0.23 GB  (Qwen2.5-7B = 56 KB/token)
+#   Draft 0.5B Q4 ................. 0.40 GB
+#   Whisper STT .................. LOAD-ON-DEMAND ONLY (shares the
+#                                  headroom instead of co-residing:
+#                                  with Whisper resident the total is
+#                                  ~5.8 GB = OVER the kill-line)
+#   TOTAL (this config) .......... ~5.35 GB  ✅ fits
+# If JARVIS ever OOMs: drop num_ctx to 3072 (saves ~0.06 GB) or set
+# draft_num_predict 0 to disable speculation entirely.
+# =====================================================================
+
+FROM C:/Users/<YOUR-NAME>/models/qwen2.5-7b-instruct-q4_k_m.gguf
+DRAFT C:/Users/<YOUR-NAME>/models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+
+# Draft proposes 4 tokens per step; the target verifies them in one
+# pass. 0 disables speculation. (Inert without a DRAFT line / MTP
+# tensors — a plain model silently runs at normal speed.)
+PARAMETER draft_num_predict 4
+
+# Context fitted to the 2060 (see VRAM math above). Ollama's own
+# default for <24 GB cards is 4K by design; do not raise this without
+# recomputing 56 KB/token x ctx + 4.4 GB weights against 5.5 GB.
+PARAMETER num_ctx 4096

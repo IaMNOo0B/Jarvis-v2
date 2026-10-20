@@ -325,9 +325,205 @@ def _check_data_dir_writable(data_dir: Path) -> Check:
         )
 
 
+# --------------------------------------------------------------------------- #
+# Soil-study extras (P9-P13) — additive checks demanded by the Jarvis Soil
+# studies (~/workspace/jarvis-soil/software-api-data.md A1/A2/A3 and the
+# hardware tiers). Opt-in via preflight(soil_extras=True); the default
+# eight checks above are unchanged. Every extra is warn-only: these are
+# soil conditions, not germination blockers.
+# --------------------------------------------------------------------------- #
+
+def _check_python_release_window() -> Check:
+    """P9 — the soil froze the runtime at 3.11/3.12 (software-api-data A1:
+    3.10 caps onnxruntime; 3.13 strands niche wheels). Warn-only."""
+    vi = sys.version_info
+    in_window = (vi.major, vi.minor) in ((3, 11), (3, 12))
+    detail = (f"Python {vi.major}.{vi.minor} is inside the tested "
+              "3.11-3.12 window." if in_window else
+              f"Python {vi.major}.{vi.minor} is outside the tested "
+              "3.11-3.12 window — some voice features may misbehave.")
+    return Check(
+        name="python_release_window",
+        title="Python in the tested window (3.11-3.12)",
+        ok=in_window,
+        warn_only=True,
+        detail=detail,
+        fix_hint=("Install Python 3.11 or 3.12 from the Python website "
+                  "(python.org) — the versions JARVIS is tested with."),
+    )
+
+
+def _mic_consent_via_registry(winreg) -> Optional[str]:
+    """Read the Windows microphone consent value ('Allow'/'Deny'/...).
+
+    `winreg` is injected (real module on Windows, a fake in tests).
+    Returns None when the value cannot be read.
+    """
+    sub = (r"SOFTWARE\Microsoft\Windows\CurrentVersion"
+           r"\CapabilityAccessManager\ConsentStore\microphone")
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub, 0,
+                            winreg.KEY_READ) as key:
+            value, _ = winreg.QueryValueEx(key, "Value")
+            return str(value)
+    except OSError:
+        return None
+
+
+def _check_mic_privacy() -> Check:
+    """P10 — mic privacy toggle (software-api-data A2: fresh-machine
+    breakage #1; a denied toggle means the wake word can never fire)."""
+    if os.name != "nt":
+        return Check(
+            name="mic_privacy", title="Microphone permission",
+            ok=True, warn_only=True,
+            detail="Not a Windows computer — this check does not apply.",
+            fix_hint="")
+    state: Optional[str] = None
+    try:
+        import winreg
+        state = _mic_consent_via_registry(winreg)
+    except Exception:
+        state = None
+    if state is None:
+        return Check(
+            name="mic_privacy", title="Microphone permission",
+            ok=True, warn_only=True,
+            detail=("Could not read the microphone permission setting. "
+                    "JARVIS will ask when you first use voice."),
+            fix_hint="")
+    allowed = state.lower() == "allow"
+    return Check(
+        name="mic_privacy", title="Microphone permission",
+        ok=allowed, warn_only=True,
+        detail=("Windows allows apps to use the microphone."
+                if allowed else
+                "Windows is currently blocking microphone access — "
+                "JARVIS will not be able to hear you."),
+        fix_hint=("Open Windows Settings, choose 'Privacy and security', "
+                  "then 'Microphone', and switch on microphone access. "
+                  "Then start JARVIS again."),
+    )
+
+
+def _check_path_encoding(data_dir: Path) -> Check:
+    """P11 — non-ASCII paths break model caches on fresh machines
+    (software-api-data A5 #9). Warn-only."""
+    bad = [str(p) for p in (Path.home(), data_dir)
+           if not str(p).isascii()]
+    ok = not bad
+    return Check(
+        name="path_encoding", title="Folder names use plain letters",
+        ok=ok, warn_only=True,
+        detail=("All folder names on JARVIS's path use plain letters."
+                if ok else
+                "A folder on JARVIS's path contains special letters "
+                f"({bad[0]}), which can confuse some model downloads."),
+        fix_hint=("When setup asks where to keep JARVIS's data, choose a "
+                  "folder whose name uses plain English letters only."),
+    )
+
+
+def _total_ram_bytes() -> Optional[int]:
+    """Total physical RAM, stdlib only. None when unknowable."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _MemStatus(ctypes.Structure):
+                _fields_ = [("dwLength", ctypes.c_ulong),
+                            ("dwMemoryLoad", ctypes.c_ulong),
+                            ("ullTotalPhys", ctypes.c_ulonglong),
+                            ("ullAvailPhys", ctypes.c_ulonglong),
+                            ("ullTotalPageFile", ctypes.c_ulonglong),
+                            ("ullAvailPageFile", ctypes.c_ulonglong),
+                            ("ullTotalVirtual", ctypes.c_ulonglong),
+                            ("ullAvailVirtual", ctypes.c_ulonglong),
+                            ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+
+            status = _MemStatus()
+            status.dwLength = ctypes.sizeof(_MemStatus)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(
+                    ctypes.byref(status)):
+                return int(status.ullTotalPhys)
+            return None
+        meminfo = Path("/proc/meminfo")
+        if meminfo.exists():
+            for line in meminfo.read_text(encoding="utf-8").splitlines():
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024
+        if hasattr(os, "sysconf"):
+            return int(os.sysconf("SC_PHYS_PAGES")) * \
+                int(os.sysconf("SC_PAGE_SIZE"))
+    except Exception:  # noqa: BLE001 — a probe must never crash setup
+        return None
+    return None
+
+
+def _check_memory_size() -> Check:
+    """P12 — RAM vs the soil hardware tiers (16 GB recommended;
+    under 8 GB is cloud-brain territory). Warn-only."""
+    total = _total_ram_bytes()
+    if total is None:
+        return Check(
+            name="memory_size", title="Computer memory",
+            ok=True, warn_only=True,
+            detail="Could not measure this computer's memory; skipping.",
+            fix_hint="")
+    gb = total / 1024**3
+    ok = total >= 8 * 1024**3
+    return Check(
+        name="memory_size", title="Computer memory",
+        ok=ok, warn_only=True,
+        detail=(f"This computer has {gb:.0f} GB of memory — comfortable "
+                "for JARVIS." if ok else
+                f"This computer has {gb:.0f} GB of memory. JARVIS will "
+                "lean on the cloud brain; the local brain will be tight."),
+        fix_hint=("Close other large apps while JARVIS runs, or add "
+                  "memory if this computer allows it."),
+    )
+
+
+def _check_ollama_health() -> Check:
+    """P13 — local brain health probe (software-api-data A3: health-check
+    Ollama on startup; the cloud brain is the fallback when it is down).
+    Loopback only — this never phones home. Warn-only."""
+    try:
+        req = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+        with urllib.request.urlopen(req, timeout=1.0) as resp:
+            running = resp.status == 200
+    except Exception:  # noqa: BLE001 — down is a normal state
+        running = False
+    return Check(
+        name="ollama_health", title="Local brain (Ollama)",
+        ok=running, warn_only=True,
+        detail=("The local brain is running — JARVIS can think offline."
+                if running else
+                "The local brain is not running. JARVIS will use the "
+                "cloud brain until it is opened."),
+        fix_hint=("Open the Ollama app from the Start menu, then start "
+                  "JARVIS again. JARVIS also works without it, using "
+                  "the cloud brain."),
+    )
+
+
+def _soil_extra_checks(data_dir: Path) -> list[tuple[str, Callable[[], Check]]]:
+    return [
+        ("python_release_window", _check_python_release_window),
+        ("mic_privacy", _check_mic_privacy),
+        ("path_encoding", lambda: _check_path_encoding(data_dir)),
+        ("memory_size", _check_memory_size),
+        ("ollama_health", _check_ollama_health),
+    ]
+
+
 def preflight(data_dir: Optional[Path] = None,
-              model_manifest: Optional[list[dict]] = None) -> list[Check]:
+              model_manifest: Optional[list[dict]] = None,
+              soil_extras: bool = False) -> list[Check]:
     """Run the 8 checks, cheap -> expensive. Never phones home (Cl. 2.3).
+
+    With soil_extras=True, the five additive soil-study checks (P9-P13)
+    run after the core eight; the default behavior is unchanged.
 
     A check that raises reports plain words + a fix (Clause 2.2) — the
     preflight itself must never crash.
@@ -344,6 +540,8 @@ def preflight(data_dir: Optional[Path] = None,
         ("model_assets", lambda: _check_model_assets(model_manifest, models_dir)),
         ("mic_camera", _check_mic_camera),
     ]
+    if soil_extras:
+        checks += _soil_extra_checks(data_dir)
     results: list[Check] = []
     for name, fn in checks:
         try:

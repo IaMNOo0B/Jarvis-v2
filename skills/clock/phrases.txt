@@ -1,0 +1,12 @@
+# Clock skill — deterministic phrases (grammar: see jarvis/intent_router.py)
+# One rule per line: [Intent] pattern -> tool
+
+[Now] time kya hai -> now
+[Now] abhi time kya hai -> now
+[Now] samay kya hai -> now
+[Now] what time is it -> now
+[Now] what is the time -> now
+[Now] tell me the time -> now
+[Now] समय क्या है -> now
+[Now] time batao -> now
+[Now] time -> now

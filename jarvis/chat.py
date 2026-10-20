@@ -151,7 +151,7 @@ TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read"]
 
 # First-party skills ship WITH v2: approved at first run (the voicebox
 # pattern — first-party skips approval, never the sandbox).
-FIRST_PARTY_SKILLS = ("echo", "notes", "clock", "knowledge", "web", "code")
+FIRST_PARTY_SKILLS = ("echo", "notes", "clock", "knowledge", "web", "code", "reminders", "system", "finance", "email", "calendar")
 
 
 class ChatApp:
@@ -175,6 +175,8 @@ class ChatApp:
         from jarvis.brain import Brain, ToolDef
         from jarvis.llm_ollama import make_llm_call
         from jarvis import approvals as approvals_mod
+        from jarvis import contracts as contracts_mod
+        from jarvis import effects as effects_mod
 
         rules_path = base_dir / "JARVIS-RULES.txt"
         if not rules_path.exists():
@@ -199,6 +201,27 @@ class ChatApp:
         self.config.load()
         self.store = SessionStore(str(data_dir / "sessions.db"))
         self.memory = Memory(str(data_dir / "memory.db"))
+        # Ext-6: point the DCL's module-level secret registry at THIS
+        # data dir, so secrets registered for redaction persist (salted
+        # digests only, never the values) across restarts. Guarded:
+        # redaction keeps working in-memory if the registry file
+        # cannot load — startup never dies over it.
+        try:
+            from jarvis import dcl as _dcl_mod
+            _dcl_mod.configure_registry(str(data_dir))
+        except Exception:
+            pass
+        # Analytics patterns: if earlier sessions left pattern
+        # proposals waiting for the owner's decision, say so in ONE
+        # line at startup — no modal, no ringing; /patterns reviews
+        # them. Guarded: a broken patterns store stays silent.
+        try:
+            from jarvis.patterns import PatternStore
+            if PatternStore(data_dir).pending():
+                print("[patterns] I noticed a few patterns — ask me "
+                      "about them when ready (/patterns).")
+        except Exception:
+            pass
 
         self.registry = SkillRegistry(base_dir / "skills", data_dir)
         self.registry.discover()
@@ -208,7 +231,10 @@ class ChatApp:
             except Exception as exc:
                 print(f"[warn] could not approve first-party skill {name!r}: {exc}")
 
-        # The gate's registry: tool_name -> {tier, schema, capabilities}.
+        # The gate's registry: tool_name -> {tier, schema, capabilities}
+        # + the recovery pack's declared contracts, copied from the
+        # manifests so gate.dispatch can journal effects and evaluate
+        # postconditions for exactly the tools that declared them.
         gate_registry: dict = {}
         for skill_name in self.registry._records:
             rec = self.registry._records[skill_name]
@@ -219,6 +245,8 @@ class ChatApp:
                     "tier": tool.tier,
                     "schema": tool.parameters,
                     "capabilities": list(tool.capabilities),
+                    "effects": [dict(e) for e in tool.effects],
+                    "postconditions": [dict(p) for p in tool.postconditions],
                 }
         # Wave 3: PC control tools. Enabled by default — the owner asked
         # for full capability ("he can do all the stuff like you do").
@@ -228,15 +256,52 @@ class ChatApp:
         if enable_pc:
             from jarvis import pc_control
             import platform
+            # Builder C: the learned app registry (name -> path,
+            # SQLite in the data dir) makes repeat launches instant.
+            # Guarded: if its file cannot be created or opened, PC
+            # control still works — only the learned rung of the
+            # launch ladder is off, never a startup crash.
+            app_registry = None
+            try:
+                app_registry = pc_control.AppRegistry(
+                    data_dir / "app_registry.db")
+            except Exception:
+                app_registry = None
             if platform.system() == "Windows":
-                self._pc = pc_control.PCController()
+                self._pc = pc_control.PCController(
+                    app_registry=app_registry)
             else:
                 print("[pc] Not Windows — PC control runs on the FAKE backend "
                       "(structure real, no real clicks).")
                 self._pc = pc_control.PCController(
-                    backend=pc_control.FakeUiaBackend())
+                    backend=pc_control.FakeUiaBackend(),
+                    app_registry=app_registry)
             gate_registry.update(pc_control.as_gate_registry())
-        self.gate = Gate(rules={}, skill_registry=gate_registry)
+        # Recovery pack wiring: the gate journals declared effects into
+        # the session store and evaluates declared postconditions
+        # against real state (the data dir is the fs root — skill jails
+        # live at <data_dir>/<skill>, which the manifest targets name).
+        # Failed postcondition reports land in _contract_reports, keyed
+        # (session_id, turn_id, tool); the brain/chat TAKE them from
+        # there to stamp tool.result payloads (see _take_contract_report).
+        self._contract_reports: dict = {}
+
+        def _contract_sink(record: dict) -> None:
+            try:
+                key = (record.get("session_id"), record.get("turn_id"),
+                       record.get("tool"))
+                self._contract_reports[key] = record.get("report")
+            except Exception:
+                pass  # evidence plumbing never breaks a dispatch
+
+        self.gate = Gate(
+            rules={}, skill_registry=gate_registry,
+            effect_sink=effects_mod.make_store_sink(self.store),
+            effect_fs_root=str(data_dir),
+            fact_exists=lambda k: self.memory.get_fact(k) is not None,
+            postcondition_evaluator=contracts_mod.make_evaluator(
+                fs_root=str(data_dir), memory=self.memory),
+            contract_sink=_contract_sink)
         self._Verdict = Verdict
 
         # Brain tools: ToolDef(name, fn) where fn runs the skill pipeline.
@@ -278,6 +343,9 @@ class ChatApp:
             tools.append(ToolDef(name=n, description=desc,
                                  parameters=info["schema"], fn=make_fn(n)))
         self._turn_id = 0
+        # Routine (morning digest) session events waiting for this
+        # turn's user.message to exist — see _flush_routine_events.
+        self._pending_routine_events: list = []
         # Brain chain: smartest first. If the owner has cloud API keys,
         # those models (Gemini, Kimi, GPT-OSS...) answer first — they're
         # far smarter than the local 7B. Local Ollama is the offline
@@ -357,6 +425,23 @@ class ChatApp:
                     self_knowledge += "\n\n--- LESSONS FROM YOUR TEACHER ---\n" + teaching
         except Exception:
             pass
+        # Live capability self-knowledge (Ext-1): the brain reads what
+        # JARVIS can do from the real registry — plus the PC tool table
+        # when PC control is on — on every prompt build, so it answers
+        # "can you do X?" from live fact, never a stale memorized list.
+        # This is the ONLY Brain construction site: the CLI (main) and
+        # the GUI (chat_gui) both reach it through ChatApp.
+        from jarvis.capabilities import capabilities_provider_for
+        _pc_tool_defs = None
+        if self._pc is not None:
+            from jarvis import pc_control as _pc_control
+            _pc_tool_defs = _pc_control.tool_definitions()
+        # Kept for the capability network: the router, the prompt and
+        # /capabilities all aggregate over the same sources.
+        self._pc_tool_defs = _pc_tool_defs
+        self._network = None  # latest CapabilityNetwork snapshot
+        capabilities_provider = capabilities_provider_for(
+            self.registry, _pc_tool_defs)
         self.brain = Brain(
             gate=self.gate,
             session_store=self.store,
@@ -367,9 +452,41 @@ class ChatApp:
             # OmniRoute -> Pollinations); redact always — harmless for local
             # (PUBLIC/PERSONAL pass through), correct for cloud.
             self_knowledge=self_knowledge,
+            memory=self.memory,  # gated auto-recall every turn (Recall Gate)
+            capabilities_provider=capabilities_provider,
+            # The unified capability network (jarvis.capnet): when it
+            # builds, its self-description replaces the plain summary in
+            # the prompt, capnet.select pre-routes deterministic tasks,
+            # and turn outcomes flow back into its health scores.
+            network_provider=self._capability_network,
+            # Recovery pack: the brain takes failed postcondition
+            # reports for its gated dispatches from the gate's stash —
+            # stamping tool.result payloads and feeding the ladder.
+            contract_lookup=self._take_contract_report,
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
+        # Deterministic intent tier (mega-scan steals: Rhasspy grammar
+        # tier + Open.Jarvis local-intent-first). Exact grammar hits for
+        # REAL skill tools dispatch through the same gate-first path an
+        # LLM tool call takes (see _route_turn) — zero model calls for
+        # boring commands. Virtual system intents and fuzzy guesses
+        # never execute from here. Building the router must never break
+        # startup: on any failure the app behaves exactly as before and
+        # the brain handles every turn.
+        self.router = None
+        try:
+            from jarvis.intent_router import IntentRouter
+            _router = IntentRouter()
+            _router.load_skills_root(base_dir / "skills")
+            _router.load_phrases(
+                "system",
+                (Path(__file__).resolve().parent /
+                 "system_phrases.txt").read_text(encoding="utf-8"))
+            self.router = _router
+        except Exception as exc:
+            print(f"[router] intent tier unavailable ({exc}) — "
+                  "the brain handles all turns.")
 
     @property
     def last_provider(self) -> str:
@@ -384,16 +501,665 @@ class ChatApp:
             return "stub"
         return getattr(chain, "last_via", "unknown")
 
+    # -- capability network (jarvis.capnet) -------------------------------- #
+    def _capability_network(self):
+        """Build the unified capability network over JARVIS's live parts.
+
+        Sources: the skill registry + PC tool table (live health via
+        jarvis.capabilities), the brain's provider chain (with its
+        measured stats), and THIS session's capnet outcome scores from
+        the session store — a node that keeps failing at similar work
+        sinks in the router. Pure aggregation, rebuilt on demand so
+        approvals, quarantine flips and breaker trips show up at once;
+        the latest snapshot is kept on self._network for the router
+        and the /capabilities command. Returns None when the build
+        fails: every consumer must degrade to life without the network.
+        """
+        try:
+            from jarvis.capnet import build_network, health_scores
+            scores = {}
+            sid = getattr(self, "session_id", None)
+            if sid:
+                try:
+                    scores = health_scores(self.store, session_id=sid)
+                except Exception:
+                    scores = {}
+            net = build_network(self.registry, self._pc_tool_defs,
+                                providers=getattr(self, "_chain", None),
+                                scores=scores)
+            self._network = net
+            return net
+        except Exception:
+            return getattr(self, "_network", None)
+
+    # -- recovery pack wiring ------------------------------------------------ #
+    def _take_contract_report(self, session_id, turn_id, tool_name):
+        """TAKE the latest failed postcondition report for one gated
+        dispatch (the gate's contract_sink stash). Take semantics: each
+        dispatch overwrites its key and each consumer pops it, so a
+        later attempt of the same tool in the same turn can never read
+        an earlier attempt's stale failure."""
+        try:
+            return self._contract_reports.pop(
+                (session_id, turn_id, tool_name), None)
+        except Exception:
+            return None
+
+    def _current_turn_id(self):
+        """The id this turn's executions journal under: the event id of
+        the session's most recent user.message (brain turns and routed
+        turns both open with one). None when no turn has opened."""
+        try:
+            events = self.store.get_events(self.session_id, 0, 100000)
+            for ev in reversed(events):
+                if ev.get("type") == "user.message":
+                    return ev.get("event_id")
+        except Exception:
+            pass
+        return None
+
+    def _execute_gated(self, tool_name: str, args: dict, fn, turn_id):
+        """Execute one already-checked routed call THROUGH gate.dispatch
+        (turn-scoped), so the recovery-pack hooks fire: declared effects
+        journal into the session store and declared postconditions are
+        evaluated against real state. Returns (ok, raw_out, content,
+        report): raw_out is captured from the executor closure (dispatch
+        returns only the wrapped string); report is the TAKE of the
+        contract stash for this call (None when the postconditions
+        passed or none were declared)."""
+        captured: dict = {}
+
+        def _exec(_name, _args):
+            try:
+                captured["raw"] = fn(_args)
+            except Exception as exc:
+                captured["exc"] = exc
+                raise
+            return captured["raw"]
+
+        payload_text = None
+        entry = self.gate.registry.get(tool_name) or {}
+        if entry.get("network_egress") or any(
+                str(c).startswith("net.")
+                for c in entry.get("capabilities", [])):
+            # The gate's own rule: network-bound tools dispatch only
+            # with an egress-checked payload (the args are what leaves).
+            payload_text = json.dumps(args, default=str)
+        decision, _wrapped = self.gate.dispatch(
+            tool_name, args, self._allowances, _exec,
+            payload_text=payload_text,
+            destination=tool_name if payload_text is not None else None,
+            session_id=self.session_id, turn_id=turn_id)
+        report = self._take_contract_report(self.session_id, turn_id,
+                                            tool_name)
+        if "exc" in captured:
+            exc = captured["exc"]
+            return False, None, f"error: tool '{tool_name}' raised: {exc}", report
+        verdict = getattr(decision.verdict, "value", str(decision.verdict))
+        if verdict not in ("allow", "allow_with_undo"):
+            return False, None, (f"error: the gate withheld '{tool_name}' "
+                                 f"at dispatch ({decision.reason})"), report
+        raw_out = captured.get("raw")
+        content = raw_out if isinstance(raw_out, str) else json.dumps(
+            raw_out, default=str)
+        return True, raw_out, content, report
+
+    def _reminder_cancel(self, target: str):
+        """undo_turn's reminder canceller (effects are journaled by the
+        reminder's TEXT — its id is minted inside the skill, so the
+        manifest target is {args.text}). Resolves the text to a pending
+        reminder id and cancels THROUGH the registry executor."""
+        try:
+            listed = self._executor("reminder_list", {})
+            for rem in (listed or {}).get("reminders", []):
+                if rem.get("text") == target:
+                    return self._executor("reminder_cancel",
+                                          {"id": rem.get("id", "")})
+        except Exception:
+            pass
+        return {"cancelled": False}
+
+    def _last_journaled_turn(self):
+        """The turn_id of the most recent effect.recorded event in this
+        session — the last turn that actually changed something."""
+        try:
+            events = self.store.get_events(self.session_id, 0, 100000)
+            for ev in reversed(events):
+                if ev.get("type") == "effect.recorded":
+                    return (ev.get("payload") or {}).get("turn_id")
+        except Exception:
+            pass
+        return None
+
+    def _undo_last_turn(self) -> None:
+        """/undo-turn: reverse the LAST turn of this session that
+        journaled effects (effects.undo_turn walks the journal in
+        reverse). The reply names every effect: reversed ones with
+        their action, the rest with the reason they could NOT be
+        reversed — never a blanket "undone"."""
+        from jarvis import effects as effects_mod
+        turn_id = self._last_journaled_turn()
+        if turn_id is None:
+            print("[undo] Nothing to undo, sir — no turn in this "
+                  "session journaled any effects.")
+            return
+        report = effects_mod.undo_turn(
+            self.store, self.session_id, turn_id,
+            memory=self.memory, fs_root=str(self.data_dir),
+            reminder_cancel=self._reminder_cancel)
+        total = report.get("total", 0)
+        reversed_ = report.get("reversed", [])
+        not_reversed = report.get("not_reversed", [])
+        if total == 0:
+            print("[undo] That turn journaled no effects, sir.")
+            return
+        if report.get("ok"):
+            print(f"[undo] Turn fully reversed, sir — {len(reversed_)} "
+                  f"effect(s):")
+        else:
+            print(f"[undo] Turn PARTIALLY reversed, sir — "
+                  f"{len(reversed_)} of {total} effect(s) reversed; "
+                  f"the rest could not be:")
+        for entry in reversed_:
+            print(f"  reversed: {entry.get('kind')} "
+                  f"{entry.get('target')} — {entry.get('action')}")
+        for entry in not_reversed:
+            print(f"  NOT reversed: {entry.get('kind')} "
+                  f"{entry.get('target')} — {entry.get('reason')}")
+
+    # -- deterministic intent tier ---------------------------------------- #
+    def _is_real_skill_tool(self, match) -> bool:
+        """True only when the match names a tool that actually exists in
+        the manifest of the approved skill the match claims. Virtual
+        "system" intents (observe_screen, launch_app, close_thing...)
+        are intent NAMES, not tools — they never dispatch from here."""
+        rec = self.registry._records.get(match.skill)
+        if rec is None or not rec.approved or rec.manifest is None:
+            return False
+        return any(t.name == match.tool for t in rec.manifest.tools)
+
+    def _route_turn(self, text: str):
+        """Try the deterministic intent tier for this turn.
+
+        Returns a TurnResult when an EXACT grammar hit (confidence 1.0)
+        names a real, approved skill tool — dispatched through the same
+        gate-first path Brain.respond uses for LLM tool calls, minus
+        the model. Returns None for everything else (no match, fuzzy
+        guess, virtual system intent): the brain handles the turn as
+        always. Fuzzy matches are NOT hinted into the brain —
+        Brain.respond(session_id, text, allowances) has no context
+        parameter, and inventing one is a brain change, not wiring.
+        Routing failures degrade to None: routing NEVER breaks a turn.
+        """
+        router = getattr(self, "router", None)
+        if router is None:
+            return None
+        try:
+            match = router.route(text)
+        except Exception:
+            return None
+        if match is None or match.fuzzy or match.confidence < 1.0:
+            return None  # fuzzy args are provisional — the LLM's turn
+        if not self._is_real_skill_tool(match):
+            return None  # virtual system intent: the brain's own pc.*
+            # gate flow owns it; the words alone never execute here
+        try:
+            return self._dispatch_routed(text, match)
+        except Exception:
+            return None
+
+    def _dispatch_routed(self, text: str, match, via: str = "intent_router"):
+        """Execute one routed hit through the gate, brain-style.
+
+        Mirrors Brain._respond_inner's Act step event-for-event so the
+        completion audit and conversation history see a normal tool
+        turn: user.message -> tool.call (gate verdict FIRST, before
+        anything executes) -> tool.result -> brain.reply. A
+        require_approval verdict returns the same TurnResult shape the
+        brain produces, so turn()'s approval flow handles it unchanged.
+        ``via`` names the routing tier on the tool.call event
+        ("intent_router" for the grammar tier, "capnet" for the
+        capability network) — the ONLY difference between the tiers'
+        event streams.
+        """
+        from jarvis.brain import TurnResult
+        store = self.store
+        sid = self.session_id
+        args = dict(match.args)
+        user_ev = store.emit(sid, "user.message", {"text": text},
+                             actor="user", trust="user")
+        decision = self.gate.check(match.tool, args, self._allowances)
+        verdict = getattr(decision.verdict, "value", str(decision.verdict))
+
+        def _finish(result):
+            # Same post-turn audit the brain attaches (evidence only).
+            try:
+                from jarvis.completion_audit import CompletionAudit
+                result.audit = CompletionAudit(store).audit_turn(sid)
+            except Exception as exc:
+                result.audit = {"delivered": False,
+                                "reason": f"audit unavailable: {exc}"}
+            return result
+
+        if verdict == "deny":
+            store.emit(sid, "tool.call",
+                       {"tool": match.tool, "args": args,
+                        "gate_verdict": "deny",
+                        "reason": getattr(decision, "reason", ""),
+                        "via": via},
+                       actor="brain", trust="system", causal_parent=user_ev)
+            reply = (f"I can't do that, sir — the gate denied "
+                     f"{match.tool} "
+                     f"({getattr(decision, 'reason', 'not allowed')}).")
+            store.emit(sid, "brain.reply", {"text": reply},
+                       actor="brain", trust="user", causal_parent=user_ev)
+            return _finish(TurnResult(status="answered", text=reply))
+
+        if verdict == "require_approval":
+            call_ev = store.emit(
+                sid, "tool.call",
+                {"tool": match.tool, "args": args,
+                 "gate_verdict": "require_approval", "proposed": True,
+                 "executed": False, "via": via},
+                actor="brain", trust="system", causal_parent=user_ev)
+            req = getattr(decision, "approval_request", None) or {}
+            store.emit(sid, "approval.requested",
+                       {"action": match.tool, "args": args, "request": req},
+                       actor="brain", trust="system", causal_parent=call_ev)
+            return _finish(TurnResult(
+                status="approval_required",
+                text=(f"This needs your approval first, sir: {match.tool}. "
+                      "I've paused — nothing has run."),
+                approval_request={"tool": match.tool, "args": args,
+                                  "request": req}))
+
+        # allow / allow_with_undo — the ONLY path to execution.
+        call_ev = store.emit(sid, "tool.call",
+                             {"tool": match.tool, "args": args,
+                              "gate_verdict": verdict,
+                              "via": via},
+                             actor="brain", trust="system",
+                             causal_parent=user_ev)
+        tool = self.brain.tools.get(match.tool)
+        if tool is None or tool.fn is None:
+            store.emit(sid, "tool.result",
+                       {"ok": False,
+                        "error": f"tool '{match.tool}' is not registered"},
+                       actor="tool", trust="tool_untrusted",
+                       causal_parent=call_ev)
+            reply = (f"That didn't work, sir: tool '{match.tool}' "
+                     "is not registered.")
+            store.emit(sid, "brain.reply", {"text": reply},
+                       actor="brain", trust="user", causal_parent=call_ev)
+            return _finish(TurnResult(status="answered", text=reply))
+        # Execute THROUGH gate.dispatch (turn-scoped to this turn's
+        # user.message event): declared effects journal and declared
+        # postconditions are evaluated against real state.
+        ok, raw_out, content, report = self._execute_gated(
+            match.tool, args, tool.fn, user_ev)
+        result_payload = {"ok": ok, "output": content[:2000]}
+        if report is not None:
+            # Stamp the typed failure: the completion audit reads the
+            # turn as NOT delivered even though the tool claimed ok.
+            from jarvis.contracts import mark_result
+            result_payload = mark_result(result_payload, report)
+        store.emit(sid, "tool.result",
+                   result_payload,
+                   actor="tool", trust="tool_untrusted",
+                   causal_parent=call_ev)
+        if ok and report is not None and not report.get("passed", True):
+            failures = "; ".join(
+                f"{c.get('check')}:{c.get('target')}"
+                for c in report.get("failures", []))
+            reply = (f"I ran {match.tool}, sir, but it failed its "
+                     f"delivery check ({failures}) — please treat that "
+                     f"as not done.")
+        else:
+            reply = (self._format_tool_reply(match, raw_out) if ok
+                     else f"That didn't work, sir: {content}")
+        store.emit(sid, "brain.reply", {"text": reply},
+                   actor="brain", trust="user", causal_parent=call_ev)
+        return _finish(TurnResult(status="answered", text=reply,
+                                  tool_calls_made=1 if ok else 0))
+
+    @staticmethod
+    def _format_tool_reply(match, raw_out) -> str:
+        """User-facing one-liner for a router-dispatched tool result.
+        Deterministic per tool; honest generic fallback otherwise."""
+        data = raw_out if isinstance(raw_out, dict) else None
+        if data is None:
+            return f"Done, sir. {str(raw_out)[:300]}"
+        if match.tool == "now" and "iso" in data:
+            iso = str(data["iso"]).replace("T", " ").split("+")[0]
+            return f"It's {iso} UTC, sir."
+        if match.tool == "reminder_set":
+            return (f"Reminder set, sir: '{match.args.get('text', '')}' "
+                    f"— due {data.get('due_at', '')} (id {data.get('id', '')}).")
+        if match.tool == "reminder_list":
+            rems = data.get("reminders") or []
+            if not rems:
+                return "No pending reminders, sir."
+            lines = [f"- {r.get('text', '')} "
+                     f"(due {r.get('due_at', '')}, id {r.get('id', '')})"
+                     for r in rems[:10]]
+            return "Your reminders, sir:\n" + "\n".join(lines)
+        if match.tool == "reminder_cancel":
+            return ("Reminder cancelled, sir." if data.get("cancelled")
+                    else "That reminder wasn't pending, sir.")
+        if data.get("ok") is False:
+            return (f"That didn't work, sir: "
+                    f"{data.get('error', data.get('reason', 'unknown error'))}")
+        return "Done, sir. (" + json.dumps(data, default=str)[:200] + ")"
+
+    # -- capability-network tier -------------------------------------------- #
+    def _capnet_tool_skill(self, tool_name: str):
+        """Owning skill name when tool_name is a REAL tool of an APPROVED
+        skill in the live registry — the capnet twin of
+        _is_real_skill_tool's registry check."""
+        for name, rec in self.registry._records.items():
+            if not rec.approved or rec.manifest is None:
+                continue
+            if any(t.name == tool_name for t in rec.manifest.tools):
+                return name
+        return None
+
+    def _capnet_dispatchable(self, net, plan, node, text: str) -> bool:
+        """The strict bar for executing a capnet plan without the LLM.
+
+        ALL of: the chosen node is a skill TOOL (never a pc/provider/
+        mcp/memory/phone node), gate tier 1, health available; the
+        router's top score carries the direct-name boost — the user
+        NAMED the tool in the text (capnet's own "named directly"
+        criterion) — so keyword-only matches, which are heuristic by
+        design, count as fuzzy and NEVER execute; the tool is real in
+        the approved registry; and the brain's tool takes NO required
+        arguments (capnet selects tools, it does not invent args —
+        anything needing arguments is the brain's turn).
+        """
+        if node is None or node.kind != "tool":
+            return False
+        if node.tier != 1 or node.health != "available":
+            return False
+        if not plan.ranked or plan.ranked[0].node_id != node.id:
+            return False
+        if plan.ranked[0].score < 4.0:
+            return False  # no direct-name boost -> fuzzy, never executes
+        if node.name.lower() not in text.lower():
+            return False
+        if self._capnet_tool_skill(node.name) is None:
+            return False
+        tool = self.brain.tools.get(node.name)
+        if tool is None or tool.fn is None:
+            return False
+        required = (tool.parameters or {}).get("required") or []
+        return not required
+
+    def _capnet_route_turn(self, text: str):
+        """Try the capability network for this turn (after the intent tier).
+
+        capnet.select() routes the task over the whole network; the
+        plan (chosen node + plain-language reason) is recorded as a
+        capnet.plan session event EITHER WAY — dispatched or not — so
+        the routing judgment is always auditable. Only a plan passing
+        _capnet_dispatchable's strict bar executes, through the same
+        gate-first dispatch the intent tier uses (via="capnet"), and
+        the LLM is skipped. Everything else returns None: the brain
+        handles the turn. Routing failures degrade to None — the
+        network NEVER breaks a turn.
+        """
+        from types import SimpleNamespace
+        from jarvis.capnet import select
+        net = self._capability_network()
+        if net is None:
+            return None
+        plan = select(net, text)
+        try:
+            self.store.emit(self.session_id, "capnet.plan",
+                            {"task": text[:200], "chosen": plan.chosen,
+                             "reason": plan.reason, "via": "capnet"},
+                            actor="brain", trust="system")
+        except Exception:
+            pass  # the plan record is telemetry, never a turn dependency
+        node = plan.chosen_node(net) if plan.chosen else None
+        if not self._capnet_dispatchable(net, plan, node, text):
+            return None
+        shim = SimpleNamespace(tool=node.name, args={})
+        try:
+            return self._dispatch_routed(text, shim, via="capnet")
+        except Exception:
+            return None
+
+    def _record_turn_outcomes(self, text: str, after_seq, result,
+                              brain_used: bool) -> None:
+        """CapNet feedback loop: fold this turn's results into outcomes.
+
+        Reads the events THIS turn produced (seq > after_seq) from the
+        session store: each tool.result is mapped back to its tool
+        through the causal parent tool.call (tool.result payloads
+        carry no name — the call does), then to its capnet node id
+        (capnet's scheme: "tool:<name>", pc tools keep their dotted
+        name). When the brain actually served the turn, the answering
+        provider earns an outcome too (ok = the turn completed as
+        answered/asked/approval). Everything lands as capnet.outcome
+        events via record_outcome, which is what health_scores reads
+        on the next network build. Telemetry: fully wrapped, a failure
+        here NEVER breaks the turn it measures.
+        """
+        if after_seq is None:
+            return
+        try:
+            from jarvis.capnet import record_outcome
+            events = self.store.get_events(self.session_id, after_seq,
+                                           100000)
+            call_tool = {}
+            for e in events:
+                if e["type"] == "tool.call":
+                    call_tool[e["event_id"]] = (e.get("payload")
+                                                or {}).get("tool")
+            for e in events:
+                if e["type"] != "tool.result":
+                    continue
+                name = call_tool.get(e.get("causal_parent"))
+                if not name:
+                    continue
+                node_id = name if name.startswith("pc.") else f"tool:{name}"
+                record_outcome(self.store, node_id,
+                               bool((e.get("payload") or {}).get("ok")),
+                               task_hint=text, session_id=self.session_id)
+            if brain_used and getattr(self, "_chain", None) is not None:
+                via = self.last_provider
+                if via and via not in ("none", "unknown", "stub"):
+                    ok = result is not None and result.status in (
+                        "answered", "asked", "approval_required")
+                    record_outcome(self.store, f"provider:{via}", ok,
+                                   task_hint=text,
+                                   session_id=self.session_id)
+        except Exception:
+            pass
+
     # -- the turn ---------------------------------------------------------- #
+    # -- morning digest routine (Ext-4 RoutineGuard) ---------------------- #
+    def _routine_guard(self):
+        """The app's RoutineGuard, built lazily (one per ChatApp).
+
+        Schedule table: a single row — the morning digest, due 05:00
+        local, fireable on the owner's first turn inside the
+        05:00–12:00 window (the catch-up span covers the whole
+        window, so a first turn at 09:00 still gets its briefing).
+        A first contact after noon records the period MISSED instead:
+        a stale "morning" briefing is never replayed in the afternoon.
+        """
+        guard = getattr(self, "_routine_guard_instance", None)
+        if guard is None:
+            from jarvis.routine_guard import RoutineGuard, RoutineSpec
+            guard = RoutineGuard(str(self.data_dir), specs={
+                "morning_digest": RoutineSpec(
+                    name="morning_digest", period="day", due="05:00",
+                    window=("05:00", "12:00"), budget_s=30.0,
+                    catch_up_minutes=420.0),
+            })
+            self._routine_guard_instance = guard
+        return guard
+
+    def _maybe_morning_digest(self) -> None:
+        """Fire the morning digest when the guard clears it.
+
+        begin() claims the period BEFORE anything runs, so a crash
+        mid-digest can never double-fire it. Fully wrapped like the
+        evolution hook: a digest failure is noted and NEVER breaks
+        a turn.
+
+        ORDERING LAW: this runs at turn start, BEFORE this turn's
+        user.message event exists — and a turn's identity everywhere
+        else is "the opening user.message event id". So the session
+        events are NOT emitted here; they are stashed and flushed by
+        _flush_routine_events() once the turn's user.message exists,
+        as its children. (The printed digest block is stdout, not a
+        session event, and still greets before the answer.)
+        """
+        try:
+            run = self._routine_guard().begin("morning_digest")
+            if run is None:
+                return  # not due / already handled / missed — silent
+            try:
+                from jarvis.morning_digest import digest_lines
+                lines = digest_lines(str(self.data_dir))
+            except Exception:
+                run.finish("failed")
+                raise
+            if lines:
+                print("[morning digest]")
+                for line in lines:
+                    print(f"  {line}")
+            status = run.finish("fired")
+            self._stash_routine_event(
+                "routine.fired",
+                {"name": "morning_digest", "status": status})
+        except Exception as exc:
+            self._stash_routine_event(
+                "routine.digest_error",
+                {"error": f"{type(exc).__name__}: {exc}"})
+
+    def _stash_routine_event(self, etype: str, payload: dict) -> None:
+        pending = getattr(self, "_pending_routine_events", None)
+        if pending is None:
+            pending = self._pending_routine_events = []
+        pending.append((etype, payload))
+
+    def _flush_routine_events(self) -> None:
+        """Emit any stashed routine events as children of THIS turn's
+        user.message (its event id via _current_turn_id). Called at
+        every turn exit point, after dispatch — by then brain turns
+        and routed turns alike have opened with their user.message.
+        Never raises: evidence plumbing must not break a turn."""
+        pending = getattr(self, "_pending_routine_events", None)
+        if not pending:
+            return
+        self._pending_routine_events = []
+        try:
+            parent = self._current_turn_id()
+        except Exception:
+            parent = None
+        for etype, payload in pending:
+            try:
+                self.store.emit(self.session_id, etype, payload,
+                                actor="system", trust="system",
+                                causal_parent=parent)
+            except Exception:
+                pass
+
     def turn(self, text: str) -> None:
         self._turn_id += 1
-        print("[thinking]")
+        # Idle self-evolution review (Ext-7): once a day, when the user
+        # has been idle long enough, JARVIS reviews itself — foundry
+        # scan, yesterday's diary, memory consolidation. The guard is
+        # the only per-turn cost (one small state read + one MAX(ts)
+        # query); run_review itself never raises, and anything failing
+        # here is swallowed with an event note — a review must NEVER
+        # break a turn.
         try:
-            result = self.brain.respond(self.session_id, text, self._allowances)
+            from datetime import datetime, timezone
+            from jarvis.evolution_runner import (
+                last_user_turn_at, read_last_run, run_review, should_run)
+            _now = datetime.now(timezone.utc)
+            if should_run(read_last_run(self.data_dir), _now,
+                          last_user_turn=last_user_turn_at(self.store)):
+                run_review(self.data_dir, self.store, self.memory, _now)
         except Exception as exc:
-            print(f"[error] Brain failed honestly: {exc}")
-            traceback.print_exc()
-            return
+            try:
+                self.store.emit(
+                    self.session_id, "evolution.review_error",
+                    {"error": f"{type(exc).__name__}: {exc}"},
+                    actor="system", trust="system")
+            except Exception:
+                pass
+        # Morning digest (Ext-4): the RoutineGuard decides — due,
+        # claimed, or missed — JARVIS runs only what it clears. The
+        # helper is fully wrapped; it cannot break the turn.
+        self._maybe_morning_digest()
+        # Ring any due reminders before the user's turn (call-ringing model:
+        # they appear once, then clear).
+        try:
+            import importlib.util as _ilu
+            _spec = _ilu.spec_from_file_location(
+                "reminders_skill_check",
+                str(Path(__file__).resolve().parent.parent /
+                    "skills" / "reminders" / "skill.py"))
+            _rm = _ilu.module_from_spec(_spec)
+            _spec.loader.exec_module(_rm)
+
+            class _RCtx:
+                pass
+
+            _rc = _RCtx()
+            _rc.jail_dir = str(self.data_dir)
+            for due in _rm.purge_due(_rc):
+                print(f"[reminder] {due['text']}")
+        except Exception:
+            pass
+        # Inject relevant learned corrections into this turn's context.
+        try:
+            from jarvis.golden_pairs import PairStore
+            store = PairStore(self.data_dir / "golden_pairs.jsonl")
+            pairs = store.relevant(text)
+            self.brain._learned_context = store.format_for_prompt(pairs)
+        except Exception:
+            self.brain._learned_context = ""
+        print("[thinking]")
+        # CapNet outcome watermark: events with seq beyond this belong
+        # to THIS turn; _record_turn_outcomes reads them back at the
+        # end of the turn for the network's feedback loop.
+        turn_mark = None
+        try:
+            _prior = self.store.get_events(self.session_id, 0, 100000)
+            turn_mark = _prior[-1]["seq"] if _prior else 0
+        except Exception:
+            turn_mark = None
+        result = None
+        try:
+            result = self._route_turn(text)
+        except Exception:
+            result = None  # the intent tier must never break a turn
+        if result is None:
+            # Capability-network tier: deterministic intents already
+            # had their chance above and still win; the network routes
+            # only unambiguous, named, tier-1 tasks (see
+            # _capnet_dispatchable) and merely records its plan for
+            # everything else.
+            try:
+                result = self._capnet_route_turn(text)
+            except Exception:
+                result = None  # the network tier must never break a turn
+        brain_used = result is None
+        if result is None:
+            try:
+                result = self.brain.respond(self.session_id, text,
+                                            self._allowances)
+            except Exception as exc:
+                print(f"[error] Brain failed honestly: {exc}")
+                traceback.print_exc()
+                self._flush_routine_events()
+                return
         if result.status == "approval_required":
             req = result.approval_request or {}
             gate_req = req.get("request", {}) or {}
@@ -426,14 +1192,21 @@ class ChatApp:
             approved = self._approvals.request_approval(
                 areq, budget=self._approval_budget, input_fn=input_fn)
             if approved:
+                # Turn-scoped: the approved execution journals under the
+                # same user.message event id that opened this turn, so
+                # /undo-turn can reverse it with the rest of the turn.
                 decision, out = self.gate.execute_approved(
                     gate_req.get("token", ""), req.get("tool", ""),
-                    req.get("args", {}), executor=self._executor)
+                    req.get("args", {}), executor=self._executor,
+                    session_id=self.session_id,
+                    turn_id=self._current_turn_id())
                 print(f"[approved] {decision.reason}")
                 if out:
                     print(out[:500])
             else:
                 print("[denied] Not executed, sir.")
+            self._flush_routine_events()
+            self._record_turn_outcomes(text, turn_mark, result, brain_used)
             return
         state = {
             "answered": "[answered]",
@@ -441,6 +1214,39 @@ class ChatApp:
             "stopped": "[stopped]",
         }.get(result.status, f"[{result.status}]")
         print(f"{state} {result.text}")
+        self._flush_routine_events()
+        self._record_turn_outcomes(text, turn_mark, result, brain_used)
+
+        # Learning loop (DPO-in-miniature): if THIS message was a correction
+        # of the PREVIOUS answer, save the pair — JARVIS learns from it.
+        try:
+            from jarvis.golden_pairs import PairStore, GoldenPair, detect_correction
+            correction = detect_correction(text)
+            if correction and getattr(self, "_last_exchange", None):
+                prev_q, prev_a = self._last_exchange
+                # Anti-poisoning (Builder A, CowAgent doctrine): a
+                # "correction" that is really a negative capability claim
+                # ("that is beyond my capabilities", "the web tool
+                # doesn't work") must never be stored as a lesson —
+                # stored defeats harden into self-refusals. filter_lesson
+                # is the storage gate; lazy import, as chat already
+                # imports brain lazily throughout __init__.
+                from jarvis.brain import filter_lesson
+                if not filter_lesson(correction):
+                    print("[learned] Skipped — that phrasing claims a "
+                          "capability limit, and defeats are not stored "
+                          "as lessons.")
+                else:
+                    store = PairStore(self.data_dir / "golden_pairs.jsonl")
+                    store.save(GoldenPair(context=prev_q,
+                                          bad_response=prev_a,
+                                          good_response=correction))
+                    print("[learned] Noted your correction — "
+                          "I will do it that way.")
+            if result.status == "answered":
+                self._last_exchange = (text, result.text)
+        except Exception:
+            pass  # Learning never breaks the conversation.
 
     def _pc_call(self, tool_name: str, args: dict):
         """Route pc.* tools to the PCController. Tier-3 (pc.shell) never
@@ -458,6 +1264,8 @@ class ChatApp:
             return self._pc.type_into_field(args["element_id"], args.get("text", ""))
         if op == "key":
             return self._pc.press_key(args.get("key", ""))
+        if op == "ground":
+            return self._pc.ground_target(args["query"])
         raise RuntimeError(f"unknown pc op: {op}")
 
     def _executor(self, tool_name: str, args: dict):
@@ -495,7 +1303,11 @@ class ChatApp:
             brain_fn=brain_fn, gate=self.gate,
             allowed_user_id=user_id or None,
             token=token, executor=self._executor,
-            on_alert=lambda m: print(f"[phone alert] {m}"))
+            on_alert=lambda m: print(f"[phone alert] {m}"),
+            # Ext-3 persistence: the allow-always allowlist and the
+            # reconnect watermark only activate when the remote knows
+            # where its data dir is.
+            data_dir=str(self.data_dir))
         print("[phone] Pair from Telegram: the PC will show a 6-digit code.")
         print("[phone] Press Ctrl+C to stop.")
         import time
@@ -516,7 +1328,10 @@ class ChatApp:
 
         # -- engines: real where installed, loud stub where not ------------- #
         try:
-            transcriber = stt_mod.FasterWhisperTranscriber()
+            # "auto" = the TranscriberChain: Hinglish engine first (its
+            # weights on the machine), stock whisper next, the LOUD stub
+            # only when no real engine exists — never a silent downgrade.
+            transcriber = stt_mod.create_transcriber(engine="auto")
         except Exception as exc:
             print(f"[voice] STT unavailable ({exc}) — voice needs "
                   "faster-whisper. Staying in text mode, sir.")
@@ -541,18 +1356,55 @@ class ChatApp:
                 self.buf.append(word)
 
             def flush(self) -> None:
-                if self.buf:
+                if not self.buf:
+                    return
+                raw = " ".join(self.buf)
+                self.buf = []
+                # Speech policy (Builder B): this sink speaks through
+                # the SAME cleaner as the voice loop — markdown out,
+                # secrets redacted, clauses chunked — so the GUI path
+                # can never read out markup or a key. Same fallback
+                # discipline as voice_loop: if the cleaner itself
+                # fails, the raw sentence is spoken; a sentence that
+                # cleans to nothing (a bare code fence) is skipped.
+                # Speech never breaks because the cleaner did.
+                try:
+                    from jarvis.speech_policy import clean_for_tts
+                    chunks = clean_for_tts(raw)
+                except Exception:
+                    chunks = [raw]
+                for chunk in chunks:
                     try:
-                        engine.speak_sentence(
-                            " ".join(self.buf), on_word=lambda i: None)
+                        engine.speak_sentence(chunk,
+                                              on_word=lambda i: None)
                     except Exception as exc:
                         print(f"[voice] tts failed: {exc}")
-                    self.buf = []
 
             def discard(self) -> None:
                 self.buf = []
 
         sink = _SentenceSink()
+
+        # -- wake word: the real engine, built ONCE ---------------------- #
+        # jarvis.wakeword's factory walks its preference order (Voicute
+        # -> openWakeWord) and returns the first engine that can run on
+        # this machine. When none can, it raises with EVERY engine's
+        # exact reason — printed once here, after which wake_fn stays
+        # the honest stub (voice still runs via the non-wake paths).
+        # A detection is never faked.
+        wake_engine = None
+        try:
+            from jarvis import wakeword as ww_mod
+            wake_engine = ww_mod.create_wake_engine()
+        except Exception as exc:
+            print(f"[voice] Wake word unavailable: {exc}")
+            wake_engine = None
+        if wake_engine is not None:
+            try:
+                heard = ", ".join(wake_engine.keywords())
+            except Exception:
+                heard = "Jarvis"
+            print(f"[voice] Wake word armed ({wake_engine.name}): {heard}")
 
         def brain_fn(text: str) -> str:
             res = self.brain.respond(self.session_id, text, self._allowances)
@@ -561,8 +1413,26 @@ class ChatApp:
         def stt_fn(audio: bytes) -> dict:
             return transcriber.transcribe(audio)
 
-        def wake_fn(chunk: bytes) -> dict:
-            return {"detected": False, "score": 0.0, "word": ""}
+        if wake_engine is not None:
+            def wake_fn(chunk: bytes) -> dict:
+                """Feed one mic chunk to the wake engine; map its
+                WakeDetection onto the loop's {detected, score, word}
+                shape. The engine owns its false-wake cooldown."""
+                try:
+                    det = wake_engine.feed_frame(chunk)
+                except Exception:
+                    # A mid-loop engine failure degrades to "no wake"
+                    # — never a crash, never a phantom detection.
+                    return {"detected": False, "score": 0.0, "word": ""}
+                if det is None:
+                    return {"detected": False,
+                            "score": float(wake_engine.last_score or 0.0),
+                            "word": ""}
+                return {"detected": True, "score": float(det.score),
+                        "word": det.keyword}
+        else:
+            def wake_fn(chunk: bytes) -> dict:
+                return {"detected": False, "score": 0.0, "word": ""}
 
         # -- mic adapter: MicStream is an iterator; the loop wants read/close - #
         class _MicReader:
@@ -658,10 +1528,16 @@ class ChatApp:
             return True
         if text == "/help":
             print("Commands: /quit, /session (show session id), "
-                  "/skills (list), /memory <fact> (remember), /recall <q>, "
+                  "/skills (list), /capabilities [name] (what I can do), "
+                  "/patterns (review noticed patterns), "
+                  "/memory <fact> (remember), /recall <q>, "
+                  "/undo-turn (reverse the last turn's effects), "
                   "/key <paste-your-key> (store API key), /keys (list), "
                   "/keymove <wrong> <right> (fix misidentified key), "
                   "/provider <name> <url> <model> (add company)")
+            return True
+        if text == "/undo-turn":
+            self._undo_last_turn()
             return True
         if text == "/session":
             print(f"[session] {self.session_id}")
@@ -783,7 +1659,89 @@ class ChatApp:
             except ValueError as exc:
                 print(f"[keys] {exc}")
             return True
+        if text == "/capabilities" or text.startswith("/capabilities "):
+            self._print_capabilities(text[len("/capabilities"):].strip())
+            return True
+        if text == "/patterns" or text.startswith("/patterns "):
+            self._patterns_command(text[len("/patterns"):].strip())
+            return True
         return False
+
+    def _patterns_command(self, arg: str = "") -> None:
+        """Review the pattern proposals JARVIS derived from real usage.
+
+        No argument: list what's pending, numbered. "confirm <n>" keeps
+        one — it becomes a memory fact. "decline <n>" dismisses it FOR
+        GOOD: PatternStore.decline writes the durable suppression, so
+        a declined pattern is never proposed again. Numbers refer to
+        the pending list exactly as printed.
+        """
+        try:
+            from jarvis.patterns import PatternStore
+            store = PatternStore(self.data_dir, memory=self.memory)
+        except Exception as exc:
+            print(f"[patterns] unavailable ({exc})")
+            return
+        if not arg:
+            pending = store.pending()
+            if not pending:
+                print("[patterns] No patterns waiting for your "
+                      "decision, sir.")
+                return
+            print("[patterns] Waiting for your decision:")
+            for i, rec in enumerate(pending, 1):
+                print(f"  {i}. {rec.get('text') or rec.get('key', '')}")
+            print("[patterns] /patterns confirm <n> keeps one; "
+                  "/patterns decline <n> dismisses it for good.")
+            return
+        parts = arg.split()
+        if len(parts) == 2 and parts[0] in ("confirm", "decline"):
+            action, num = parts
+            pending = store.pending()
+            try:
+                idx = int(num)
+            except ValueError:
+                idx = 0
+            if not 1 <= idx <= len(pending):
+                print(f"[patterns] No pending pattern #{num}, sir — "
+                      "run /patterns to see the list.")
+                return
+            rec = pending[idx - 1]
+            label = rec.get("text") or rec.get("key", "")
+            try:
+                if action == "confirm":
+                    store.confirm(rec["key"])
+                    print(f"[patterns] Kept: {label}")
+                else:
+                    store.decline(rec["key"])
+                    print(f"[patterns] Dismissed for good: {label}")
+            except Exception as exc:
+                print(f"[patterns] {exc}")
+            return
+        print("[patterns] Use: /patterns, /patterns confirm <n>, "
+              "/patterns decline <n>")
+
+    def _print_capabilities(self, arg: str = "") -> None:
+        """Answer "what can you do" from the LIVE capability network.
+
+        No argument: the network's own map (describe — groups, health,
+        alternatives). With a name ("/capabilities now" or a node id
+        like "tool:now"): that node's briefing (explain — purpose,
+        use/avoid, needs, alternatives, measured record). Straight
+        from capnet, never a memorized list.
+        """
+        try:
+            from jarvis.capnet import describe, explain
+            net = self._capability_network()
+            if net is None:
+                print("[capabilities] The network is unavailable, sir.")
+                return
+            if arg:
+                print(explain(net, arg))
+            else:
+                print(describe(net, max_chars=4000))
+        except Exception as exc:
+            print(f"[capabilities] unavailable ({exc})")
 
     # -- main loop ---------------------------------------------------------- #
     def run(self) -> None:

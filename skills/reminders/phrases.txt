@@ -1,0 +1,16 @@
+# Reminders skill — deterministic phrases (grammar: jarvis/intent_router.py)
+# reminder_set needs in_minutes (int slot) + text.
+
+[SetReminder] {in_minutes:int} minute me {text} ka reminder lagao -> reminder_set
+[SetReminder] {in_minutes:int} minute me {text} ki reminder lagao -> reminder_set
+[SetReminder] {in_minutes:int} minute baad {text} yaad dilana -> reminder_set
+[SetReminder] {in_minutes:int} minute me reminder lagao {text} -> reminder_set
+[SetReminder] remind me in {in_minutes:int} minutes to {text} -> reminder_set
+[SetReminder] remind me in {in_minutes:int} minutes about {text} -> reminder_set
+[SetReminder] set a reminder in {in_minutes:int} minutes for {text} -> reminder_set
+[ListReminders] mere reminders dikhao -> reminder_list
+[ListReminders] reminders dikhao -> reminder_list
+[ListReminders] show my reminders -> reminder_list
+[ListReminders] list reminders -> reminder_list
+[CancelReminder] {id} wala reminder cancel karo -> reminder_cancel
+[CancelReminder] cancel reminder {id} -> reminder_cancel

@@ -44,6 +44,8 @@ __all__ = [
     "discover",
     "scan_skill",
     "validate_against_schema",
+    "EFFECT_KINDS",
+    "POSTCONDITION_CHECKS",
 ]
 
 # ---------------------------------------------------------------------------
@@ -53,6 +55,18 @@ __all__ = [
 CAPABILITIES = frozenset(
     {"fs.read", "fs.write", "net.outbound", "exec", "time.read", "clipboard.read"}
 )
+
+# Recovery pack (Team 29 PlanSys2 effect journal + Team 22 typed
+# postconditions): closed vocabularies for the OPTIONAL per-tool
+# ``effects`` / ``postconditions`` manifest declarations. A tool that
+# declares neither behaves exactly as before — journaling and contract
+# checks are opt-in per tool, never invented for undeclared tools.
+EFFECT_KINDS = frozenset({"file", "fact", "reminder", "setting"})
+POSTCONDITION_CHECKS = frozenset(
+    {"file_exists", "fact_exists", "fact_absent", "tool_ok"}
+)
+_EFFECT_KEYS = frozenset({"kind", "target", "existed_before", "before_value_ref"})
+_POSTCONDITION_KEYS = frozenset({"check", "target"})
 
 DEFAULT_TIMEOUT_S = 5
 DEFAULT_OUTPUT_CAP_CHARS = 10 * 1024  # 10KB
@@ -77,6 +91,8 @@ KNOWN_TOOL_KEYS = frozenset(
         "timeout_s",
         "output_cap_chars",
         "capabilities",
+        "effects",
+        "postconditions",
     }
 )
 
@@ -115,6 +131,98 @@ class GateDenied(SkillError):
 # ---------------------------------------------------------------------------
 
 
+def _validate_effects(raw: Any, *, source: str) -> tuple:
+    """Validate the OPTIONAL ``effects`` declaration (recovery pack).
+
+    Each entry: {"kind": file|fact|reminder|setting, "target": str,
+    "existed_before": bool (optional), "before_value_ref": str (optional)}.
+    ``target`` may contain ``{args.<key>}`` placeholders, resolved against
+    the call args at dispatch time (see jarvis/effects.py).
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise SkillManifestError(f"{source}: tool 'effects' must be a list")
+    out = []
+    for i, entry in enumerate(raw):
+        where = f"{source} effects[{i}]"
+        if not isinstance(entry, dict):
+            raise SkillManifestError(f"{where}: effect must be a JSON object")
+        unknown = set(entry) - _EFFECT_KEYS
+        if unknown:
+            raise SkillManifestError(
+                f"{where}: unknown effect keys {sorted(unknown)} (typo?)"
+            )
+        kind = entry.get("kind")
+        if kind not in EFFECT_KINDS:
+            raise SkillManifestError(
+                f"{where}: 'kind' must be one of {sorted(EFFECT_KINDS)}, "
+                f"got {kind!r}"
+            )
+        target = entry.get("target")
+        if not isinstance(target, str) or not target:
+            raise SkillManifestError(
+                f"{where}: 'target' must be a non-empty string"
+            )
+        existed = entry.get("existed_before")
+        if existed is not None and not isinstance(existed, bool):
+            raise SkillManifestError(
+                f"{where}: 'existed_before' must be a boolean"
+            )
+        ref = entry.get("before_value_ref")
+        if ref is not None and not isinstance(ref, str):
+            raise SkillManifestError(
+                f"{where}: 'before_value_ref' must be a string"
+            )
+        out.append(dict(entry))
+    return tuple(out)
+
+
+def _validate_postconditions(raw: Any, *, source: str) -> tuple:
+    """Validate the OPTIONAL ``postconditions`` declaration (recovery pack).
+
+    Each entry: {"check": file_exists|fact_exists|fact_absent|tool_ok,
+    "target": str}. ``target`` is required for every check except
+    ``tool_ok`` (which judges the tool's own result). Evaluated after
+    dispatch by jarvis/contracts.py against real state — a tool's own
+    success claim is never taken as success (Team 22 law).
+    """
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise SkillManifestError(
+            f"{source}: tool 'postconditions' must be a list"
+        )
+    out = []
+    for i, entry in enumerate(raw):
+        where = f"{source} postconditions[{i}]"
+        if not isinstance(entry, dict):
+            raise SkillManifestError(
+                f"{where}: postcondition must be a JSON object"
+            )
+        unknown = set(entry) - _POSTCONDITION_KEYS
+        if unknown:
+            raise SkillManifestError(
+                f"{where}: unknown postcondition keys {sorted(unknown)} (typo?)"
+            )
+        check = entry.get("check")
+        if check not in POSTCONDITION_CHECKS:
+            raise SkillManifestError(
+                f"{where}: 'check' must be one of "
+                f"{sorted(POSTCONDITION_CHECKS)}, got {check!r}"
+            )
+        target = entry.get("target")
+        if check != "tool_ok" and (not isinstance(target, str) or not target):
+            raise SkillManifestError(
+                f"{where}: 'target' must be a non-empty string for "
+                f"check {check!r}"
+            )
+        if target is not None and not isinstance(target, str):
+            raise SkillManifestError(f"{where}: 'target' must be a string")
+        out.append(dict(entry))
+    return tuple(out)
+
+
 @dataclass(frozen=True)
 class ToolDef:
     name: str
@@ -125,6 +233,8 @@ class ToolDef:
     timeout_s: int = DEFAULT_TIMEOUT_S
     output_cap_chars: int = DEFAULT_OUTPUT_CAP_CHARS
     capabilities: tuple = ()
+    effects: tuple = ()
+    postconditions: tuple = ()
 
     @classmethod
     def from_dict(cls, data: Any, *, source: str) -> "ToolDef":
@@ -186,6 +296,10 @@ class ToolDef:
             timeout_s=timeout_s,
             output_cap_chars=output_cap_chars,
             capabilities=tuple(capabilities),
+            effects=_validate_effects(data.get("effects"), source=source),
+            postconditions=_validate_postconditions(
+                data.get("postconditions"), source=source
+            ),
         )
 
 
@@ -272,6 +386,8 @@ class SkillManifest:
                         "timeout_s": t.timeout_s,
                         "output_cap_chars": t.output_cap_chars,
                         "capabilities": sorted(t.capabilities),
+                        "effects": [dict(e) for e in t.effects],
+                        "postconditions": [dict(p) for p in t.postconditions],
                     }
                     for t in self.tools
                 ],
@@ -710,6 +826,8 @@ class SkillRegistry:
                         "description": tool.description,
                         "timeout_s": tool.timeout_s,
                         "output_cap_chars": tool.output_cap_chars,
+                        "effects": [dict(e) for e in tool.effects],
+                        "postconditions": [dict(p) for p in tool.postconditions],
                     }
         raise UnknownTool(f"unknown tool {name!r}")
 

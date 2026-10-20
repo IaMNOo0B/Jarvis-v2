@@ -1,0 +1,118 @@
+{
+  "name": "reminders",
+  "description": "Set, list and cancel reminders (alarms/timers) that persist and ring at the right time.",
+  "version": "1.0.0",
+  "capabilities": ["fs.read", "fs.write", "time.read"],
+  "tools": [
+    {
+      "name": "reminder_set",
+      "description": "Set a reminder. in_minutes from now; text is the message. Returns reminder id.",
+      "effects": [
+        {"kind": "reminder", "target": "{args.text}"}
+      ],
+      "postconditions": [
+        {"check": "file_exists", "target": "reminders/reminders.json"}
+      ],
+      "tier": 2,
+      "capabilities": ["fs.write", "time.read"],
+      "timeout_s": 5,
+      "output_cap_chars": 10240,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "in_minutes": {"type": "integer", "minimum": 1, "maximum": 525600},
+          "text": {"type": "string", "minLength": 1, "maxLength": 280}
+        },
+        "required": ["in_minutes", "text"]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "string"},
+          "due_at": {"type": "string"}
+        },
+        "required": ["id", "due_at"]
+      }
+    },
+    {
+      "name": "reminder_list",
+      "description": "List pending (not yet due) reminders.",
+      "tier": 1,
+      "capabilities": ["fs.read"],
+      "timeout_s": 5,
+      "output_cap_chars": 10240,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "reminders": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "due_at": {"type": "string"},
+                "text": {"type": "string"}
+              }
+            }
+          }
+        },
+        "required": ["reminders"]
+      }
+    },
+    {
+      "name": "reminder_cancel",
+      "description": "Cancel a pending reminder by id.",
+      "tier": 2,
+      "capabilities": ["fs.write"],
+      "timeout_s": 5,
+      "output_cap_chars": 10240,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {"id": {"type": "string"}},
+        "required": ["id"]
+      },
+      "returns": {
+        "type": "object",
+        "properties": {"cancelled": {"type": "boolean"}},
+        "required": ["cancelled"]
+      }
+    },
+    {
+      "name": "reminder_due",
+      "description": "Return reminders whose due time has passed (for the app's own polling).",
+      "tier": 1,
+      "capabilities": ["fs.read"],
+      "timeout_s": 5,
+      "output_cap_chars": 10240,
+      "parameters": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {}
+      },
+      "returns": {
+        "type": "object",
+        "properties": {
+          "due": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {"type": "string"},
+                "due_at": {"type": "string"},
+                "text": {"type": "string"}
+              }
+            }
+          }
+        },
+        "required": ["due"]
+      }
+    }
+  ]
+}

@@ -19,6 +19,11 @@ import time
 import uuid
 from datetime import datetime, timezone
 
+try:
+    from jarvis.observability import LOG_BACKUP_COUNT, LOG_MAX_BYTES
+except Exception:  # observability unavailable -> day files don't roll
+    LOG_MAX_BYTES = LOG_BACKUP_COUNT = None  # type: ignore[assignment]
+
 SCHEMA_VERSION = 1
 
 # Crockford base32 for ULIDs (no I, L, O, U).
@@ -241,12 +246,50 @@ class SessionStore:
     def _append_jsonl(self, envelope: dict) -> None:
         day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         path = os.path.join(self.dir, "sessions-%s.jsonl" % day)
+        self._roll_day_file(path, day)
         line = json.dumps(envelope, separators=(",", ":"),
                            ensure_ascii=False) + "\n"
         with open(path, "a", encoding="utf-8") as f:
             f.write(line)
             f.flush()
             os.fsync(f.fileno())
+
+    def _roll_day_file(self, path: str, day: str) -> None:
+        """Size bound for the day archive (Team 19 E2 budget: the shared
+        LOG_MAX_BYTES x LOG_BACKUP_COUNT). When the live day file reaches
+        the cap it rolls to ``sessions-<day>.<n>.jsonl`` — the part name
+        keeps the ``sessions-*.jsonl`` glob the DCL audit reader scans,
+        sorts before the live file, and ascending n is chronological.
+        Parts beyond the backup budget are deleted oldest-first. The
+        archive stays date-partitioned and age-pruned as before; it just
+        can no longer grow without bound inside a single busy day.
+        Never raises: the spillover copy must not break event writes."""
+        if LOG_MAX_BYTES is None or LOG_BACKUP_COUNT is None:
+            return
+        try:
+            if not os.path.isfile(path) \
+                    or os.path.getsize(path) < LOG_MAX_BYTES:
+                return
+            prefix = "sessions-%s." % day
+            parts: list[tuple[int, str]] = []
+            for name in os.listdir(self.dir):
+                if name.startswith(prefix) and name.endswith(".jsonl"):
+                    mid = name[len(prefix):-len(".jsonl")]
+                    if mid.isdigit():
+                        parts.append((int(mid), os.path.join(self.dir, name)))
+            parts.sort()
+            n = parts[-1][0] + 1 if parts else 1
+            rolled = os.path.join(self.dir, "sessions-%s.%d.jsonl" % (day, n))
+            os.replace(path, rolled)
+            parts.append((n, rolled))
+            while len(parts) > LOG_BACKUP_COUNT:
+                _, oldest = parts.pop(0)
+                try:
+                    os.unlink(oldest)
+                except OSError:
+                    pass
+        except OSError:
+            pass
 
     def get_events(
         self, session_id: str, after_seq: int = 0, limit: int = 1000
