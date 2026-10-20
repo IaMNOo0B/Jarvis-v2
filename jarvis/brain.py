@@ -503,6 +503,9 @@ class Brain:
         rounds = 0
         tool_calls_made = 0
         consecutive_failures = 0
+        # Prevent the model from turning a denied/failed action into a success claim.
+        # A later successful tool result clears this issue.
+        last_action_issue = None
         last_parent = user_ev
 
         while True:
@@ -575,6 +578,21 @@ class Brain:
                                       causal_parent=last_parent)
                     except Exception:
                         pass  # Critique never blocks the answer.
+                # Deterministic honesty guard: do not claim an action completed when
+                # the most recent action failed or was denied and no later tool
+                # succeeded. Run AFTER critique so it cannot reintroduce the claim.
+                if last_action_issue and re.search(
+                    r"\b(done|completed|successfully|success|created|saved|sent|deleted|installed|opened|finished|updated|fixed)\b",
+                    final_text, re.IGNORECASE,
+                ):
+                    final_text = (
+                        "I can't honestly say that task is complete, sir. "
+                        f"The last action did not succeed: {last_action_issue}. "
+                        "Nothing after that failure verified completion."
+                    )
+                    self._log(session_id, "brain.completion_claim_blocked",
+                              {"reason": last_action_issue},
+                              causal_parent=last_parent)
                 self._log(session_id, "brain.reply", {"text": final_text},
                           causal_parent=last_parent, actor="brain",
                           trust="user")
@@ -611,6 +629,10 @@ class Brain:
                          "reason": getattr(decision, "reason", "")},
                         causal_parent=last_parent)
                     last_parent = call_ev
+                    last_action_issue = (
+                        f"the Gate denied {name}: "
+                        f"{getattr(decision, 'reason', 'not allowed')}"
+                    )
                     # Transient tool message — never a fake user turn.
                     messages.append({"role": "tool", "name": name,
                                      "content": f"error: the gate denied this call "
@@ -661,6 +683,7 @@ class Brain:
                     messages.append({"role": "tool", "name": name,
                                      "content": f"error: tool '{name}' is not registered."})
                     last_parent = call_ev
+                    last_action_issue = f"tool '{name}' is not registered"
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
                             session_id, last_parent, tool_calls_made, rounds, messages,
@@ -689,6 +712,7 @@ class Brain:
                 last_parent = call_ev
                 if not ok:
                     consecutive_failures += 1
+                    last_action_issue = f"tool '{name}' failed: {content[:300]}"
                     messages.append({"role": "tool", "name": name, "content": content})
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
@@ -698,6 +722,7 @@ class Brain:
                         )
                     continue
                 consecutive_failures = 0
+                last_action_issue = None
                 wrapped = self.gate.wrap_output(content, name)
                 messages.append({"role": "tool", "name": name, "content": wrapped})
 
