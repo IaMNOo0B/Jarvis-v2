@@ -1921,7 +1921,18 @@ def chain_as_llm_call(chain: FallbackChain) -> Callable:
     def _call(messages: List[Dict[str, Any]]) -> str:
         res = chain.respond(messages)
         if not res["ok"]:
-            raise BrainLLMError(f"all model providers failed: {res['error']}")
+            attempts = res.get("attempts") or []
+            # Keep the user's error honest and actionable. The previous
+            # message hid every provider's real failure behind the same
+            # "all providers exhausted" string, making diagnosis impossible.
+            details = "; ".join(
+                f"{a.get('provider', '?')}: {a.get('outcome', '?')} "
+                f"({a.get('detail', '')})"
+                for a in attempts[-6:]
+            )
+            suffix = f"; attempts: {details}" if details else ""
+            raise BrainLLMError(
+                f"all model providers failed: {res['error']}{suffix}")
         return res["reply"]
 
     return _call
