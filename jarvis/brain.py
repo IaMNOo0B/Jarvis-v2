@@ -508,6 +508,9 @@ class Brain:
         last_action_issue = None
         last_failed_tool_name = None
         last_failed_tool_args = None
+        # Track every unresolved action, not just the last one. A successful
+        # retry may clear only its exact (tool, canonical args) fingerprint.
+        unresolved_actions = {}
         last_parent = user_ev
 
         while True:
@@ -556,12 +559,15 @@ class Brain:
                 # This is status-based enforcement, not keyword detection. The
                 # model may explain the failure only after a successful recovery
                 # action; otherwise stop with the recorded failure.
-                if last_action_issue:
+                if unresolved_actions:
+                    unresolved_summary = "; ".join(
+                        unresolved_actions[key] for key in sorted(unresolved_actions)
+                    )
                     return self._honest_stop(
                         session_id, last_parent, tool_calls_made, rounds, messages,
                         "I couldn't verify completion, sir, because "
-                        f"{last_action_issue}. I won't report success without "
-                        "a successful tool result.",
+                        f"{unresolved_summary}. I won't report success without "
+                        "successful tool results for each unresolved action.",
                     )
                 # Constitutional self-critique: check the draft against the
                 # rules before delivering. One extra LLM call; fail-open.
@@ -635,6 +641,7 @@ class Brain:
                     last_failed_tool_args = json.dumps(
                         args, sort_keys=True, ensure_ascii=False, default=str
                     )
+                    unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     # The denied action did not run. Keep the denial unresolved;
                     # an unrelated successful tool must not imply it worked.
                     messages.append({"role": "tool", "name": name,
@@ -691,6 +698,7 @@ class Brain:
                     last_failed_tool_args = json.dumps(
                         args, sort_keys=True, ensure_ascii=False, default=str
                     )
+                    unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
                             session_id, last_parent, tool_calls_made, rounds, messages,
@@ -724,6 +732,7 @@ class Brain:
                     last_failed_tool_args = json.dumps(
                         args, sort_keys=True, ensure_ascii=False, default=str
                     )
+                    unresolved_actions[(name, last_failed_tool_args)] = last_action_issue
                     messages.append({"role": "tool", "name": name, "content": content})
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
@@ -740,6 +749,7 @@ class Brain:
                 )
                 if (name == last_failed_tool_name
                         and current_tool_args == last_failed_tool_args):
+                    unresolved_actions.pop((name, current_tool_args), None)
                     last_action_issue = None
                     last_failed_tool_name = None
                     last_failed_tool_args = None
