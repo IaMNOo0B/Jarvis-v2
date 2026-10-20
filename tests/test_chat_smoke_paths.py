@@ -221,3 +221,18 @@ def test_provider_order_still_works_when_local_provider_is_unavailable():
     keyless = SimpleNamespace(name="pollinations")
     ordered = _ordered_providers(None, cloud, None, keyless)
     assert [provider.name for provider in ordered] == ["groq", "pollinations"]
+
+
+
+def test_explicit_search_preserves_non_latin_query_text():
+    app = object.__new__(ChatApp)
+    app._allowances = []
+    app.registry = SimpleNamespace(_records={})
+    app._is_real_skill_tool = lambda match: match.tool == "web_search"
+    captured = {}
+    app._dispatch_routed = lambda text, match, via="intent_router": (
+        captured.update(args=match.args) or "searched")
+    app.router = None
+
+    assert app._route_turn("search for جاوس on internet") == "searched"
+    assert captured["args"]["query"] == "جاوس"
