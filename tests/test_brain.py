@@ -359,6 +359,30 @@ def test_successful_retry_of_failed_tool_clears_unresolved_failure():
     assert "saved successfully" in result.text
 
 
+def test_same_tool_with_different_arguments_does_not_clear_failure():
+    def _write(args):
+        if args.get("path") == "first.txt":
+            return {"ok": False, "error": "permission denied"}
+        return {"ok": True, "result": "other file saved"}
+
+    llm = ScriptedLLM([
+        "TOOL: write_file\nARGS: {\"path\": \"first.txt\"}",
+        "TOOL: write_file\nARGS: {\"path\": \"second.txt\"}",
+        "The file was saved successfully.",
+    ])
+    brain = make_brain(
+        llm,
+        tools=[ToolDef(name="write_file", description="Write a file.",
+                       parameters={}, fn=_write)],
+    )
+
+    result = brain.respond("s1", "save first.txt and second.txt")
+
+    assert result.status == "stopped"
+    assert "permission denied" in result.text
+    assert "saved successfully" not in result.text
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
