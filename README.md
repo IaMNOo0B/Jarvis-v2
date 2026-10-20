@@ -29,6 +29,14 @@ You do not need to edit Python code to select a provider.
 This keeps inference local. First responses can be slow while the model loads.
 On a GPU with 6 GB VRAM, performance depends on Windows/GPU memory usage.
 
+JARVIS checks for the model configured in `data/config.yaml` under
+`brain.ollama_model`. If your installed Ollama model has a different name,
+set that field to the exact name shown by `ollama list`. The
+`brain.ollama_base_url` setting defaults to `http://localhost:11434`.
+Use `/status` in the chat to see whether Ollama is reachable, which providers
+are configured, whether learning/self-critique are enabled, and how many web
+notes have been saved. The report never prints API-key values.
+
 ### Option B — Cloud provider with an API key
 
 In the JARVIS chat, enter `/key gemini YOUR_API_KEY` or use a provider name
