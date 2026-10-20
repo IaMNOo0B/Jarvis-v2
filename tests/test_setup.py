@@ -527,3 +527,46 @@ def test_status_report_shows_provider_and_learning_state_without_secrets(tmp_pat
     assert "example" in report
     assert "API key" not in report
 
+
+
+def test_doctor_report_is_read_only_and_reports_missing_provider(tmp_path):
+    from jarvis.chat import ChatApp
+
+    class FakeProvider:
+        name = "ollama"
+
+    class FakeChain:
+        providers = [FakeProvider()]
+        last_via = None
+
+    class FakeRecord:
+        approved = False
+
+    class FakeRegistry:
+        _records = {"unreviewed-skill": FakeRecord()}
+
+    app = ChatApp.__new__(ChatApp)
+    app.data_dir = tmp_path
+    app._chain = FakeChain()
+    app.registry = FakeRegistry()
+    app._pc = None
+    app._ollama_status = "model missing"
+    app.memory = None
+    (tmp_path / "learned").mkdir()
+    (tmp_path / "learned" / "guide.md").write_text("evidence", encoding="utf-8")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+
+    report = app.doctor_report()
+
+    after = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    assert before == after
+    assert "read-only" in report
+    assert "Brain provider chain: ollama" in report
+    assert "Last response provider: None" in report
+    assert "Ollama startup check: model missing" in report
+    assert "Registered skills: 1" in report
+    assert "Quarantined skills: 1" in report
+    assert "PC control: not initialized" in report
+    assert "Memory subsystem: unavailable" in report
+    assert "Saved research notes: 1" in report
+    assert "Data directory writable: yes" in report
