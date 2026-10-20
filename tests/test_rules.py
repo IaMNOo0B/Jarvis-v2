@@ -6,12 +6,13 @@ rule must refuse startup, loudly. Never a silent pass.
 
 import os
 import shutil
+from pathlib import Path
 
 import pytest
 
 from jarvis.rules import P0_REQUIRED, RulesError, load_rules
 
-REAL_RULES = os.path.expanduser("~/workspace/jarvis-knowledge/JARVIS-RULES.txt")
+REAL_RULES = str(Path(__file__).resolve().parents[1] / "JARVIS-RULES.txt")
 
 MINIMAL_P0 = """\
 P0-1  [CONFIG] First hard rule.
