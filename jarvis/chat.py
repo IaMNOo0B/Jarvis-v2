@@ -147,7 +147,7 @@ class StubLLM:
 # Turn allowances (policy, never the brain's choice):
 # reads auto-allowed; file writes allowed by capability (tier-2 still
 # announces + undo); network/exec/clipboard NOT granted in Wave 1.
-TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read"]
+# Web reads need net.outbound; sandboxed code execution needs exec and still\n# passes the tier-3 approval gate. The code sandbox itself blocks networking.\nTURN_ALLOWANCES = ["fs.read", "fs.write", "time.read", "net.outbound", "exec"]
 
 # First-party skills ship WITH v2: approved at first run (the voicebox
 # pattern — first-party skips approval, never the sandbox).
