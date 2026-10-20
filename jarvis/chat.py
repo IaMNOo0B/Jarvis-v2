@@ -961,6 +961,8 @@ class ChatApp:
                 return f"That didn't work, sir: {data.get('error', data.get('reason', 'browser launch failed'))}"
             return f"Opened {match.args.get('url', 'the website')} in your default browser, sir."
         if match.tool == "web_search":
+            if data.get("ok") is False:
+                return f"Search failed, sir: {data.get('message', data.get('error', 'unknown search error'))}"
             payload = data.get("result") if isinstance(data.get("result"), dict) else data
             results = payload.get("results") or []
             if not results:
