@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -46,6 +47,21 @@ def preflight(base_dir: Path, data_dir: Path) -> list[str]:
     except Exception as exc:
         problems.append(f"data dir not writable: {data_dir} ({exc})")
     return problems
+
+
+def _is_simple_greeting(text: str) -> bool:
+    """Recognize only standalone greetings that need no model inference.
+
+    This keeps a dead or exhausted provider chain from making basic
+    conversational contact look broken. Do not match greetings embedded
+    in a real request such as 'hi, open Chrome'.
+    """
+    normalized = re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
+    normalized = " ".join(normalized.split())
+    return normalized in {
+        "hi", "hello", "hey", "hey jarvis", "hi jarvis", "hello jarvis",
+        "good morning", "good afternoon", "good evening",
+    }
 
 
 def startup_warnings(data_dir: Path) -> list[str]:
@@ -701,8 +717,21 @@ class ChatApp:
         if match is None or match.fuzzy or match.confidence < 1.0:
             return None  # fuzzy args are provisional — the LLM's turn
         if not self._is_real_skill_tool(match):
-            return None  # virtual system intent: the brain's own pc.*
-            # gate flow owns it; the words alone never execute here
+            # A concrete, exact app-launch phrase is safe to route directly
+            # because pc.launch_app still passes through the normal Gate.
+            # This makes 'Chrome kholo' work even when every LLM provider
+            # is down; the Gate remains responsible for tier/approval.
+            if (match.skill == "system" and match.tool == "launch_app"
+                    and self._pc is not None):
+                app_name = str((match.args or {}).get("app", "")).strip()
+                if not app_name:
+                    return None
+                from types import SimpleNamespace
+                match = SimpleNamespace(
+                    skill="pc", tool="pc.launch_app",
+                    args={"name": app_name}, fuzzy=False, confidence=1.0)
+            else:
+                return None  # other virtual intents remain model-mediated
         try:
             return self._dispatch_routed(text, match)
         except Exception:
@@ -1070,6 +1099,27 @@ class ChatApp:
 
     def turn(self, text: str) -> None:
         self._turn_id += 1
+        # A standalone greeting must not depend on cloud/local model health.
+        # Persist it as a normal exchange when possible, but never make the
+        # greeting itself depend on the session logger.
+        if _is_simple_greeting(text):
+            reply = "Hello, Sir. I'm here and ready to help."
+            user_event = None
+            try:
+                user_event = self.store.emit(
+                    self.session_id, "user.message", {"text": text},
+                    actor="user", trust="user")
+            except Exception:
+                pass
+            try:
+                self.store.emit(
+                    self.session_id, "brain.reply", {"text": reply},
+                    actor="brain", trust="user",
+                    causal_parent=user_event)
+            except Exception:
+                pass
+            print(f"[answered] {reply}")
+            return
         # Idle self-evolution review (Ext-7): once a day, when the user
         # has been idle long enough, JARVIS reviews itself — foundry
         # scan, yesterday's diary, memory consolidation. The guard is
