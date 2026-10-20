@@ -149,6 +149,8 @@ class OmniRouteProvider:
         self._call = call
         self.name = name
         self.keys: List[str] = []  # single gateway key; nothing to rotate
+        # Cloud first-token latency can exceed the chain's 5s base timeout.
+        self.timeout = 15.0
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:
