@@ -734,7 +734,12 @@ class ChatApp:
                 return None  # other virtual intents remain model-mediated
         try:
             return self._dispatch_routed(text, match)
-        except Exception:
+        except Exception as exc:
+            # Do not silently turn a failed deterministic action into a
+            # generic LLM reply; that hid the exact reason "open Chrome"
+            # fell through to the model.
+            print(f"[router] dispatch failed for {match.tool}: "
+                  f"{type(exc).__name__}: {exc}")
             return None
 
     def _dispatch_routed(self, text: str, match, via: str = "intent_router"):
