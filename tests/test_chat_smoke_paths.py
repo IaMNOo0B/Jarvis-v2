@@ -145,3 +145,24 @@ def test_open_youtube_routes_to_gated_browser_url():
         "tool": "pc.open_url",
         "args": {"url": "https://www.youtube.com/"},
     }
+
+
+
+def test_pc_call_dispatches_app_launch_instead_of_falling_through():
+    app = object.__new__(ChatApp)
+    app._pc = SimpleNamespace(
+        launch_app=lambda name: {"ok": True, "name": name})
+    assert app._pc_call("pc.launch_app", {"name": "Chrome"}) == {
+        "ok": True, "name": "Chrome"
+    }
+
+
+def test_pc_open_url_rejects_non_http_schemes():
+    app = object.__new__(ChatApp)
+    app._pc = object()
+    try:
+        app._pc_call("pc.open_url", {"url": "javascript:alert(1)"})
+    except ValueError as exc:
+        assert "HTTP/HTTPS" in str(exc)
+    else:
+        raise AssertionError("non-HTTP URL should be rejected")
