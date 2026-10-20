@@ -108,3 +108,33 @@ def test_web_manifest_exposes_learning_tools_with_least_privilege():
     assert set(tools["web_learn"]["capabilities"]) == {
         "net.outbound", "fs.write"
     }
+
+def test_web_fetch_blocks_local_and_private_network_targets(monkeypatch):
+    assert web_skill._validate_public_url("http://localhost/admin")[0] is False
+    assert web_skill._validate_public_url("http://127.0.0.1:8080/")[0] is False
+    assert web_skill._validate_public_url("http://192.168.1.1/")[0] is False
+    assert web_skill._validate_public_url("file:///C:/Windows/win.ini")[0] is False
+    assert web_skill._validate_public_url("https://user:pass@example.com/")[0] is False
+
+    monkeypatch.setattr(
+        web_skill.socket, "getaddrinfo",
+        lambda *args, **kwargs: [
+            (2, 1, 6, "", ("93.184.216.34", args[1]))
+        ],
+    )
+    allowed, reason = web_skill._validate_public_url("https://example.com/docs")
+    assert allowed is True
+    assert reason == ""
+
+
+def test_web_fetch_blocks_public_hostname_resolving_to_private_ip(monkeypatch):
+    monkeypatch.setattr(
+        web_skill.socket, "getaddrinfo",
+        lambda *args, **kwargs: [
+            (2, 1, 6, "", ("10.0.0.8", args[1]))
+        ],
+    )
+    allowed, reason = web_skill._validate_public_url("https://example.com/")
+    assert allowed is False
+    assert "private" in reason.lower()
+
