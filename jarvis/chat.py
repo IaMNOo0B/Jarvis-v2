@@ -201,6 +201,9 @@ class ChatApp:
             },
             "learning": {
                 "enabled": Field(bool, True),
+                # Saving conversation content is opt-in; privacy filters are
+                # heuristic and cannot guarantee that all sensitive data is caught.
+                "auto_episode_capture": Field(bool, False),
             },
             "data_retention_days": Field(int, 365),
         }
@@ -389,7 +392,8 @@ class ChatApp:
             max_tool_calls=self.config.get("brain.max_tool_calls", 12),
             self_critique=self.config.get("brain.self_critique", True),
             memory=self.memory,
-            auto_learn=self.config.get("learning.enabled", True),
+            memory_enabled=self.config.get("learning.enabled", True),
+            auto_learn=self.config.get("learning.auto_episode_capture", False),
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
@@ -406,15 +410,20 @@ class ChatApp:
             learned_count = sum(1 for p in learned_dir.glob("*.md") if p.is_file())
         except Exception:
             learned_count = 0
+        chain_state = ("stub only — no model provider initialized"
+                       if getattr(self, "_chain", None) is None
+                       else "initialized; providers are not all health-checked")
         return "\n".join([
             "JARVIS status:",
+            f"- Provider chain: {chain_state}",
+            f"- Providers in fallback chain (not all health-checked): {', '.join(providers)}",
             f"- Last response provider: {self.last_provider}",
-            f"- Available providers: {', '.join(providers)}",
-            f"- Ollama: {getattr(self, '_ollama_status', 'not checked')}",
-            f"- Local episodic learning: {'on' if self.config.get('learning.enabled', True) else 'off'}",
+            f"- Ollama startup health: {getattr(self, '_ollama_status', 'not checked')}",
+            f"- Memory recall: {'on' if self.config.get('learning.enabled', True) else 'off'}",
+            f"- Automatic episode capture: {'ON (conversation text may be saved locally)' if self.config.get('learning.auto_episode_capture', False) else 'off (opt-in; recommended default)'}",
             f"- Self-critique: {'on' if self.config.get('brain.self_critique', True) else 'off'}",
             f"- Saved web-learning notes: {learned_count}",
-            "- Internet research tools: web_search, web_fetch, web_learn, learning_search",
+            "- Internet research tools: web_search, web_fetch, web_learn, learning_search (availability depends on provider/network)",
         ])
 
     @property
