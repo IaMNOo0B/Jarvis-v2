@@ -106,5 +106,5 @@ def test_web_manifest_exposes_learning_tools_with_least_privilege():
     assert tools["learning_search"]["tier"] == 1
     assert tools["web_learn"]["tier"] == 2
     assert set(tools["web_learn"]["capabilities"]) == {
-        "net.outbound", "fs.write", "time.read"
+        "net.outbound", "fs.write"
     }
