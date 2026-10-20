@@ -254,6 +254,37 @@ def test_two_failed_attempts_honest_stop():
     assert "2 failed" in result.text
 
 
+def test_structured_tool_failure_counts_as_failure_and_execution_attempt():
+    attempts = []
+
+    def _returns_failure(args):
+        attempts.append(dict(args))
+        return {"ok": False, "error": {"code": "schema_error",
+                                       "message": "required field missing"}}
+
+    llm = ScriptedLLM([
+        "TOOL: structured_tool\nARGS: {}",
+        "TOOL: structured_tool\nARGS: {}",
+        "TOOL: structured_tool\nARGS: {}",  # must stop after 2 failed attempts
+    ])
+    store = FakeSessionStore()
+    brain = make_brain(
+        llm, store=store,
+        tools=[ToolDef(name="structured_tool", description="Returns registry-style results.",
+                       parameters={}, fn=_returns_failure)],
+    )
+
+    result = brain.respond("s1", "complete the task")
+
+    assert result.status == "stopped"
+    assert len(attempts) == 2
+    assert result.tool_calls_made == 2
+    results = store.of_type("tool.result")
+    assert len(results) == 2
+    assert all(event["payload"]["ok"] is False for event in results)
+    assert all("schema_error" in event["payload"]["output"] for event in results)
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
