@@ -236,3 +236,38 @@ def test_explicit_search_preserves_non_latin_query_text():
 
     assert app._route_turn("search for جاوس on internet") == "searched"
     assert captured["args"]["query"] == "جاوس"
+
+
+
+def test_explicit_search_failure_does_not_fall_through_to_the_model(capsys):
+    app = object.__new__(ChatApp)
+    app._allowances = ["fs.read"]
+    app.registry = SimpleNamespace(_records={})
+    app._is_real_skill_tool = lambda match: match.tool == "web_search"
+    app._dispatch_routed = lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("search tool failed"))
+    app.router = None
+
+    result = app._route_turn("search for jarvis on internet")
+
+    assert result.status == "answered"
+    assert "couldn't complete that web search" in result.text
+    assert app._allowances == ["fs.read"]
+    assert "search tool failed" in capsys.readouterr().out
+
+
+def test_app_launch_dispatch_failure_does_not_fall_through_to_the_model(capsys):
+    app = object.__new__(ChatApp)
+    app.router = SimpleNamespace(route=lambda _text: SimpleNamespace(
+        skill="system", tool="launch_app", args={"app": "Chrome"},
+        fuzzy=False, confidence=1.0))
+    app.registry = SimpleNamespace(_records={})
+    app._pc = object()
+    app._dispatch_routed = lambda *_a, **_k: (_ for _ in ()).throw(
+        RuntimeError("launch failed"))
+
+    result = app._route_turn("open chrome")
+
+    assert result.status == "answered"
+    assert "couldn't complete that action safely" in result.text
+    assert "launch failed" in capsys.readouterr().out
