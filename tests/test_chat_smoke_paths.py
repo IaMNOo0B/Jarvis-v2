@@ -176,3 +176,27 @@ def test_approved_pc_executor_uses_pc_controller_not_skill_registry():
     assert app._executor("pc.launch_app", {"name": "Chrome"}) == {
         "ok": True, "name": "Chrome"
     }
+
+
+
+def test_builtin_system_grammar_matches_plain_english_app_commands():
+    from pathlib import Path
+    from jarvis.intent_router import IntentRouter
+
+    root = Path(__file__).resolve().parent.parent
+    router = IntentRouter()
+    router.load_skills_root(root / "skills")
+    router.load_phrases(
+        "system",
+        (root / "jarvis" / "system_phrases.txt").read_text(encoding="utf-8"),
+    )
+
+    chrome = router.route("open chrome?")
+    assert chrome is not None and chrome.fuzzy is False
+    assert chrome.skill == "system" and chrome.tool == "launch_app"
+    assert chrome.args == {"app": "chrome"}
+
+    youtube = router.route("open youtube")
+    assert youtube is not None and youtube.fuzzy is False
+    assert youtube.skill == "system" and youtube.tool == "launch_app"
+    assert youtube.args == {"app": "youtube"}
