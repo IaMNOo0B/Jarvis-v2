@@ -506,6 +506,7 @@ class Brain:
         # Prevent the model from turning a denied/failed action into a success claim.
         # A later successful tool result clears this issue.
         last_action_issue = None
+        last_failed_tool_name = None
         last_parent = user_ev
 
         while True:
@@ -676,6 +677,7 @@ remove keyword detector                self._log(session_id, "brain.reply", {"te
                                      "content": f"error: tool '{name}' is not registered."})
                     last_parent = call_ev
                     last_action_issue = f"tool '{name}' is not registered"
+                    last_failed_tool_name = name
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
                             session_id, last_parent, tool_calls_made, rounds, messages,
@@ -705,6 +707,7 @@ remove keyword detector                self._log(session_id, "brain.reply", {"te
                 if not ok:
                     consecutive_failures += 1
                     last_action_issue = f"tool '{name}' failed: {content[:300]}"
+                    last_failed_tool_name = name
                     messages.append({"role": "tool", "name": name, "content": content})
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
@@ -714,7 +717,11 @@ remove keyword detector                self._log(session_id, "brain.reply", {"te
                         )
                     continue
                 consecutive_failures = 0
-                last_action_issue = None
+                # A successful unrelated tool does not erase a previous failure.
+                # Clear it only when the same failed tool later succeeds.
+                if name == last_failed_tool_name:
+                    last_action_issue = None
+                    last_failed_tool_name = None
                 wrapped = self.gate.wrap_output(content, name)
                 messages.append({"role": "tool", "name": name, "content": wrapped})
 
