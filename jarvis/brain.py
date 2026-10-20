@@ -729,7 +729,7 @@ class Brain:
                     omitted_chars = len(content) - MAX_TOOL_OUTPUT_CHARS
                     content = (
                         content[:MAX_TOOL_OUTPUT_CHARS]
-                        + f"\\n[TRUNCATED: omitted {omitted_chars} characters of tool output]"
+                        + f" [TRUNCATED: omitted {omitted_chars} characters of tool output]"
                     )
                 self._log(session_id, "tool.result",
                           {"ok": ok, "output": content[:2000]},
