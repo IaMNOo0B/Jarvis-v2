@@ -285,6 +285,30 @@ def test_structured_tool_failure_counts_as_failure_and_execution_attempt():
     assert all("schema_error" in event["payload"]["output"] for event in results)
 
 
+def test_failed_tool_cannot_be_followed_by_false_completion_claim():
+    def _failure(args):
+        return {"ok": False, "error": "file write permission denied"}
+
+    llm = ScriptedLLM([
+        "TOOL: write_file\\nARGS: {}",
+        "Done, I successfully saved the file.",
+    ])
+    store = FakeSessionStore()
+    brain = make_brain(
+        llm, store=store,
+        tools=[ToolDef(name="write_file", description="Write a file.",
+                       parameters={}, fn=_failure)],
+    )
+
+    result = brain.respond("s1", "save the file")
+
+    assert result.status == "answered"
+    assert "can't honestly say that task is complete" in result.text
+    assert "permission denied" in result.text
+    assert "Done, I successfully saved" not in result.text
+    assert len(store.of_type("brain.completion_claim_blocked")) == 1
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
