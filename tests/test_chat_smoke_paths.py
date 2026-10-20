@@ -271,3 +271,10 @@ def test_app_launch_dispatch_failure_does_not_fall_through_to_the_model(capsys):
     assert result.status == "answered"
     assert "couldn't complete that action safely" in result.text
     assert "launch failed" in capsys.readouterr().out
+
+
+
+def test_slash_command_names_are_case_insensitive(capsys):
+    app = object.__new__(ChatApp)
+    assert app.handle_command("/HELP") is True
+    assert "Commands:" in capsys.readouterr().out
