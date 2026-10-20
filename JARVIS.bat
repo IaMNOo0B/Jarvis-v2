@@ -12,6 +12,15 @@ if errorlevel 1 (
     pause
     exit /b 1
 )
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3,11) else 1)" >nul 2>&1
+if errorlevel 1 (
+    echo.
+    echo  [JARVIS] Python 3.11 or newer is required. Install 64-bit Python
+    echo  from python.org, tick "Add python.exe to PATH", then retry.
+    echo.
+    pause
+    exit /b 1
+)
 
 REM --- F-07: single instance. Clear only a lock with no JARVIS GUI process. ---
 set "JARVIS_LOCK=%TEMP%\jarvis-v2.lock"
