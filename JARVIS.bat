@@ -13,14 +13,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-REM --- F-07: single instance. Remove stale lock if no JARVIS process exists. ---
+REM --- F-07: single instance. Clear only a lock with no JARVIS GUI process. ---
 set "JARVIS_LOCK=%TEMP%\jarvis-v2.lock"
 if exist "%JARVIS_LOCK%" (
-    tasklist /FI "IMAGENAME eq python.exe" 2>nul | find /I "python.exe" >nul
+    powershell -NoProfile -Command "if (Get-CimInstance Win32_Process ^| Where-Object { $_.CommandLine -match 'jarvis\.chat_gui' }) { exit 0 } else { exit 1 }" >nul 2>&1
     if not errorlevel 1 (
         echo.
-        echo  [JARVIS] A Python process is running. If JARVIS is already open,
-        echo  use that window. If it is not, close other Python tasks and retry.
+        echo  [JARVIS] Already running — look for the JARVIS window.
+        echo  If it is not visible, close the JARVIS Python process and retry.
         echo.
         pause
         exit /b 0
