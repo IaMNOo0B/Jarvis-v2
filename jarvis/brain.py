@@ -528,10 +528,10 @@ class Brain:
 
             # Act: every proposed call goes through the gate FIRST. No exceptions.
             for name, args in payload:
-                if tool_calls_made >= MAX_TOOL_CALLS:
+                if tool_calls_made >= self.max_tool_calls:
                     return self._honest_stop(
                         session_id, last_parent, tool_calls_made, rounds, messages,
-                        f"I stopped after {MAX_TOOL_CALLS} tool calls, sir — that's my per-turn limit.",
+                        f"I stopped after {self.max_tool_calls} tool calls, sir — that's my per-turn limit.",
                     )
                 decision = self.gate.check(name, args, allowances)
                 verdict = _verdict_name(decision.verdict)
