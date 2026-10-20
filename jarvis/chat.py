@@ -190,7 +190,7 @@ class ChatApp:
         schema = {
             "profile": Field(str, "owais"),
             "brain": {
-                "max_rounds": Field(int, 3, min=1, max=10),
+                "max_rounds": Field(int, 5, min=1, max=10),
                 "max_tool_calls": Field(int, 12, min=1, max=50),
                 "omniroute_model": Field(str, "google/gemini-2.5-flash"),
             },
@@ -368,6 +368,8 @@ class ChatApp:
             # OmniRoute -> Pollinations); redact always — harmless for local
             # (PUBLIC/PERSONAL pass through), correct for cloud.
             self_knowledge=self_knowledge,
+            max_rounds=self.config.get("brain.max_rounds", 5),
+            max_tool_calls=self.config.get("brain.max_tool_calls", 12),
         )
         self._approvals = approvals_mod
         self.session_id = self.store.create_session("owais", "cli")
