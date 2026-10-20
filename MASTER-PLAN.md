@@ -1,7 +1,8 @@
 # JARVIS v2 — MASTER PLAN (Wave 1: The Spine)
 
-*Planned 2026-10-19 per the JARVIS Master Planner spec. This is a contract: deviation voids.*
-*Status: PROPOSED — awaiting Owais's approval to execute.*
+*Original plan drafted 2026-10-19 per the JARVIS Master Planner spec.*
+*Status: HISTORICAL / PARTIALLY IMPLEMENTED. This document's original environment assumptions are stale.*
+*Current implementation audit: see IMPLEMENTATION-GAP-AUDIT.md. Do not use this file's old repo/403 statements as current facts.*
 
 ---
 
@@ -15,7 +16,7 @@
 - The Gate blocks a test prompt-injection and an undeclared tool call (proven by tests, not claims).
 - A skill can be added as a folder (SKILL.md + skill.json + skill.py) and is quarantined until approved.
 - `pytest` passes 100% on the shipped suite.
-- Delivered as a zip Owais installs via GitHub Desktop (pushes are 403-blocked).
+- Current delivery path: GitHub branch + pull request; Windows install and smoke-test evidence are still required.
 
 **Falsification of success:** if the chatbot can't hold a 10-turn conversation without crashing, or any shipped test is faked/skipped — the plan failed.
 
@@ -26,7 +27,7 @@
 - Scaffold exists: ~/workspace/jarvis-v2/ (chat/, brain/, skills/, memory/, tools/, tests/, docs/).
 - JARVIS-RULES.txt is the single rules source (38 rules, P0–P3).
 - 2060 measurements: internet-sourced priors in hand; on-card numbers still unknown.
-- GitHub: pushes 403-blocked; jarvis-v2 repo not yet created by Owais.
+- GitHub: repository exists and the current implementation work is tracked in a branch/PR. See IMPLEMENTATION-GAP-AUDIT.md for current status.
 
 **Unknowns:**
 - [Owais] Creates the `jarvis-v2` repo? (needed before any push attempt)
