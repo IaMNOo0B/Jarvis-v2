@@ -2,7 +2,8 @@
 
 from types import SimpleNamespace
 
-from jarvis.chat import (ChatApp, _is_simple_greeting, _simple_chat_reply,\n                         _ordered_providers)
+from jarvis.chat import (ChatApp, _is_simple_greeting, _simple_chat_reply,
+                         _ordered_providers)
 
 
 def test_standalone_greetings_are_provider_independent():
