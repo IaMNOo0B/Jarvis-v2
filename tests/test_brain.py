@@ -653,3 +653,17 @@ def test_self_critique_can_be_enabled_for_answer_review():
     assert llm.calls == 2
     assert result.text.startswith("This answer is intentionally")
 
+def test_cloud_self_critique_redacts_original_user_text(fake_dcl_module):
+    llm = ScriptedLLM([
+        "This is a deliberately long answer so that the self-critique stage is triggered.",
+        "VIOLATIONS: none\\nREVISED: NO CHANGE NEEDED",
+    ])
+    brain = make_brain(llm, off_machine=True, self_critique=True)
+
+    result = brain.respond("s1", "Explain this token sk-abc123 safely")
+
+    assert result.status == "answered"
+    assert llm.calls == 2
+    assert "sk-abc123" not in llm.prompts[1][0]["content"]
+    assert "[REDACTED:SECRET]" in llm.prompts[1][0]["content"]
+
