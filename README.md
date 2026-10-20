@@ -1,29 +1,65 @@
-# JARVIS v2 — Wave 1: The Spine
+# JARVIS v2
 
-Text chatbot core. Session store → Gate → Brain → Skills → Memory → DCL,
-governed by `JARVIS-RULES.txt`. Voice comes last (Wave 4).
+JARVIS is a Windows-first desktop assistant built around a gated tool system:
+chat → intent routing / brain → Gate → approved skill or PC action → result.
 
-## Run it (no terminal needed for daily use)
+## Run it
 
-1. Install Python 3.11+ from python.org (tick "Add to PATH").
-2. Open this folder, double-click `run-chat.bat` (Windows).
-3. Type. That's it.
+1. Install **64-bit Python 3.11 or newer** from python.org and enable **Add Python to PATH**.
+2. Double-click **`JARVIS.bat`** to open the graphical chat.
+3. For the terminal chat instead, double-click **`run-chat.bat`**.
+4. Start Ollama from the Windows Start menu if you want the local model available.
 
-## What's inside
+The GUI appears while JARVIS initializes its providers. If startup fails, read the message shown in the window rather than repeatedly launching another copy.
 
-| Folder | What |
+## Brain and provider order
+
+When providers are healthy, JARVIS tries:
+
+1. **Ollama (local)** — preferred for privacy and avoiding cloud quotas.
+2. Configured API-key providers.
+3. OmniRoute, if its local gateway is running.
+4. Pollinations, as a keyless online fallback.
+
+If none are available, JARVIS may fall back to a clearly limited stub. A stub is not a full language model; check the GUI's provider status if replies seem canned or irrelevant.
+
+## Actions and safety
+
+- App launches and browser navigation go through the Gate and may require approval.
+- Explicit web-search requests use the `web_search` skill. Search needs an internet connection.
+- JARVIS should report an actual action failure instead of claiming that it succeeded.
+- Store API keys only through JARVIS's supported key command/settings flow. **Never paste keys into ordinary chat messages or screenshots/logs.** If a key has been exposed, revoke it at its provider and create a replacement.
+
+## Troubleshooting
+
+- **Generic or irrelevant replies:** check which provider is active and whether Ollama is running. If all providers fail, inspect the error details instead of assuming a tool ran.
+- **Chrome or another app does not open:** verify the app is installed and approve the action if JARVIS asks.
+- **YouTube or another supported website does not open:** verify that Windows has a default browser configured.
+- **Internet search fails:** check the network connection; JARVIS must say when the search tool returns an error.
+- **OmniRoute unavailable:** this is optional. JARVIS can use other available providers; do not expect OmniRoute unless its local service is running.
+
+## Repository map
+
+| Path | Purpose |
 |---|---|
-| `jarvis/` | The core package (52 modules): rules, config, session store, gate, brain, memory, DCL, capability network, voice loop, PC control, proactivity, supervisor + chat CLI/GUI |
-| `skills/` | 11 first-party skills (echo, notes, clock, knowledge, web, code, reminders, system, finance, email, calendar) |
-| `tests/` | 1862 pytest tests, all passing |
-| `JARVIS-RULES.txt` | THE rules file — edit it, restart, JARVIS obeys |
-| `MASTER-PLAN.md` | The build contract |
-| `R-COVERAGE.md` | R1–R14 verification checklist |
+| `jarvis/` | Chat, brain, provider adapters, intent router, Gate, memory, PC control and supporting modules |
+| `skills/` | First-party tools such as web search, reminders, notes, clock and code |
+| `tests/` | Regression and safety tests |
+| `JARVIS-RULES.txt` | Core assistant rules |
+| `MASTER-PLAN.md` | Build plan |
+| `FIRST-RUN-AUTOPSY.md` | Known startup and first-run risks; verify findings against current code before relying on older notes |
 
-## The honest notes
+## Run tests
 
-- **Stub brain:** Wave 1 ships with a deterministic stub so the whole
-  pipeline is provable today. Connect Ollama/Qwen at install for the real
-  model (one-line swap in `jarvis/chat.py`).
-- **Tests:** `python -m pytest tests/` — 1862 passed.
-- **Data:** lives in `./data/` (sessions, memory, config). Delete it for a fresh start.
+With Python 3.11+ installed:
+
+```bash
+python -m pip install pytest numpy
+python -m pytest tests/ -q
+```
+
+The GitHub Actions workflow runs the same test suite on pull requests. Windows-specific app launches, Ollama performance and real provider credentials still require a smoke test on the target PC.
+
+## Local data
+
+The `data/` folder contains sessions, memory and local indexes. It is ignored by Git and should remain private. Back it up before removing it; deleting it resets local history.
