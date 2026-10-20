@@ -404,6 +404,7 @@ def test_retrying_one_of_multiple_failed_actions_does_not_clear_the_other():
     ])
     brain = make_brain(
         llm,
+        max_rounds=5,
         tools=[
             ToolDef(name="write_file", description="Write a file.",
                     parameters={}, fn=_write),
