@@ -129,7 +129,7 @@ PRESETS: Dict[str, Dict[str, str]] = {
     },
     "gemini": {
         "base_url": "https://generativelanguage.googleapis.com/v1beta/openai/",
-        "model": "gemini-2.5-pro",  # frontier, permanent free tier
+        "model": "gemini-2.5-flash",  # free tier (2.5-pro needs billing; use /provider to override)
     },
     "chutes": {
         "base_url": "https://llm.chutes.ai/v1",
