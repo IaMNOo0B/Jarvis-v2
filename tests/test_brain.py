@@ -290,7 +290,7 @@ def test_failed_tool_cannot_be_followed_by_false_completion_claim():
         return {"ok": False, "error": "file write permission denied"}
 
     llm = ScriptedLLM([
-        "TOOL: write_file\\nARGS: {}",
+        "TOOL: write_file\nARGS: {}",
         "Done, I successfully saved the file.",
     ])
     store = FakeSessionStore()
