@@ -489,3 +489,40 @@ def test_approved_sandbox_tool_passes_only_the_matching_tier3_action(tmp_path):
 
     assert result == "executed"
 
+def test_status_report_shows_provider_and_learning_state_without_secrets(tmp_path):
+    from jarvis.chat import ChatApp
+
+    class FakeConfig:
+        def get(self, path, default=None):
+            values = {
+                "learning.enabled": True,
+                "brain.self_critique": True,
+            }
+            return values.get(path, default)
+
+    class FakeProvider:
+        name = "ollama"
+
+    class FakeChain:
+        providers = [FakeProvider()]
+        last_via = "ollama"
+
+    app = ChatApp.__new__(ChatApp)
+    app.data_dir = tmp_path
+    app.config = FakeConfig()
+    app._chain = FakeChain()
+    app._ollama_status = "ollama reachable; model 'example' present"
+
+    (tmp_path / "learned").mkdir()
+    (tmp_path / "learned" / "one.md").write_text("source", encoding="utf-8")
+
+    report = app.status_report()
+
+    assert "Last response provider: ollama" in report
+    assert "Available providers: ollama" in report
+    assert "Local episodic learning: on" in report
+    assert "Self-critique: on" in report
+    assert "Saved web-learning notes: 1" in report
+    assert "example" in report
+    assert "API key" not in report
+
