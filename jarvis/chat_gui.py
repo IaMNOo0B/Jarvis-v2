@@ -180,6 +180,9 @@ class ChatWindow:
                     self._on_turn_done()
                 elif kind == "abandoned":
                     pass  # F-09: orphaned worker's epitaph — ignore it
+                elif kind == "quit":
+                    self.root.destroy()
+                    return
         except queue.Empty:
             pass
         # Watchdog: the entry must NEVER be stuck disabled while the app
@@ -295,6 +298,9 @@ class ChatWindow:
         try:
             # Slash commands NEVER reach the brain (F-01: key-leak fix).
             if text.startswith("/") and self.app.handle_command(text):
+                if text.strip() == "/quit":
+                    # CLI exits its input loop for /quit; the GUI must close too.
+                    self.q.put(("quit", None))
                 return
             self.app.turn(text)
         except Exception as exc:  # never kill the window on a brain error
@@ -316,24 +322,6 @@ class ChatWindow:
 
     def run(self) -> None:
         self.root.mainloop()
-
-
-def main() -> None:
-    base_dir = Path(__file__).resolve().parent.parent
-    data_dir = base_dir / "data"
-    # Reuse the CLI's preflight + ChatApp wiring.
-    from jarvis.chat import preflight, ChatApp
-    problems = preflight(base_dir, data_dir)
-    if problems:
-        # No terminal here — show the problems in a dialog and exit.
-        root = tk.Tk()
-        root.withdraw()
-        tk.messagebox.showerror(
-            "JARVIS — cannot start",
-            "Preflight failed:\n\n" + "\n".join("• " + p for p in problems))
-        sys.exit(2)
-    app = ChatApp(base_dir, data_dir)
-    ChatWindow(app).run()
 
 
 def main() -> None:
