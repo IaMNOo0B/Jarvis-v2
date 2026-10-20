@@ -763,7 +763,11 @@ class ChatApp:
                     except Exception as exc:
                         print(f"[router] search dispatch failed: "
                               f"{type(exc).__name__}: {exc}")
-                        return None
+                        from jarvis.brain import TurnResult
+                        return TurnResult(
+                            status="answered",
+                            text="I couldn't complete that web search, sir. "
+                                 "Please check the diagnostic log.")
                     finally:
                         self._allowances = previous_allowances
 
@@ -809,10 +813,14 @@ class ChatApp:
             return self._dispatch_routed(text, match)
         except Exception as exc:
             # Preserve the actual failure rather than silently disguising it
-            # as a generic model reply.
+            # as a generic model reply or retrying the same intent via LLM.
             print(f"[router] dispatch failed for {match.tool}: "
                   f"{type(exc).__name__}: {exc}")
-            return None
+            from jarvis.brain import TurnResult
+            return TurnResult(
+                status="answered",
+                text="I couldn't complete that action safely, sir. "
+                     "Please check the diagnostic log.")
 
     def _dispatch_routed(self, text: str, match, via: str = "intent_router"):
         """Execute one routed hit through the gate, brain-style.
