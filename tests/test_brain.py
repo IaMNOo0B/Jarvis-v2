@@ -313,8 +313,8 @@ def test_unrelated_success_does_not_hide_previous_tool_failure():
         return {"ok": False, "error": "permission denied"}
 
     llm = ScriptedLLM([
-        "TOOL: write_file\\nARGS: {}",
-        "TOOL: get_time\\nARGS: {}",
+        "TOOL: write_file\nARGS: {}",
+        "TOOL: get_time\nARGS: {}",
         "Done, the file was saved successfully.",
     ])
     brain = make_brain(
