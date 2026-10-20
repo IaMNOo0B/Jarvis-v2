@@ -37,6 +37,9 @@ Use `/status` in the chat to see Ollama's startup health, providers in the
 fallback chain (which are not all independently health-checked), the last
 provider used, memory/capture settings, self-critique, and saved web notes.
 The report never prints API-key values.
+Use `/doctor` for read-only readiness diagnostics covering providers, skills,
+PC control, memory, research notes, and data-directory writability. It never
+installs or repairs anything.
 
 ### Option B — Cloud provider with an API key
 
