@@ -66,7 +66,7 @@ def _is_simple_greeting(text: str) -> bool:
 
 def _simple_chat_reply(text: str) -> str | None:
     """Answer common social turns without asking a tool planner to guess."""
-    normalized = re.sub(r"[^a-z0-9\\s]", "", (text or "").lower()).strip()
+    normalized = re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
     normalized = " ".join(normalized.split())
     if _is_simple_greeting(normalized):
         return "Hello, Sir. I'm here and ready to help."
@@ -732,7 +732,7 @@ class ChatApp:
         # Explicit search commands have a deterministic tool + argument.
         # Grant net.outbound only for this user-requested search, then restore
         # the normal turn allowances immediately after gated dispatch.
-        normalized = re.sub(r"[^a-z0-9\\s:/._-]", "", (text or "").lower())
+        normalized = re.sub(r"[^a-z0-9\s:/._-]", "", (text or "").lower())
         normalized = " ".join(normalized.split())
         query = None
         for prefix in ("search the internet for ", "search internet for ",
@@ -741,7 +741,7 @@ class ChatApp:
                 query = normalized[len(prefix):].strip()
                 break
         if query:
-            query = re.sub(r"\\s+(?:on|over)\\s+(?:the\\s+)?internet$", "", query).strip()
+            query = re.sub(r"\s+(?:on|over)\s+(?:the\s+)?internet$", "", query).strip()
             if query:
                 search_match = SimpleNamespace(
                     skill="web", tool="web_search",
