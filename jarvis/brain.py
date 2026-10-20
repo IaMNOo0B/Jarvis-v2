@@ -207,12 +207,17 @@ class Brain:
         llm_off_machine: bool = False,
         self_knowledge: str = "",
         self_critique: bool = False,
+        max_rounds: int = MAX_ROUNDS,
+        max_tool_calls: int = MAX_TOOL_CALLS,
     ) -> None:
         self.gate = gate
         self.sessions = session_store
         self.rules = rules
         self.llm_call = llm_call
         self._self_knowledge = self_knowledge
+        # Keep caller configuration bounded by the same hard safety limits.
+        self.max_rounds = max(1, min(10, int(max_rounds)))
+        self.max_tool_calls = max(1, min(50, int(max_tool_calls)))
         self.tools: Dict[str, ToolDef] = {t.name: t for t in (tools or [])}
         # Constitutional self-critique: one extra LLM pass over draft answers.
         # Off by default (latency); enable when quality > speed.
@@ -434,16 +439,16 @@ class Brain:
 
         while True:
             # Termination: caps are checked BEFORE each round.
-            if rounds >= MAX_ROUNDS:
+            if rounds >= self.max_rounds:
                 return self._honest_stop(
                     session_id, last_parent, tool_calls_made, rounds, messages,
-                    f"I stopped after {MAX_ROUNDS} thinking rounds without converging, sir. "
+                    f"I stopped after {self.max_rounds} thinking rounds without converging, sir. "
                     "No answer is better than a made-up one.",
                 )
-            if tool_calls_made >= MAX_TOOL_CALLS:
+            if tool_calls_made >= self.max_tool_calls:
                 return self._honest_stop(
                     session_id, last_parent, tool_calls_made, rounds, messages,
-                    f"I stopped after {MAX_TOOL_CALLS} tool calls, sir — that's my per-turn limit.",
+                    f"I stopped after {self.max_tool_calls} tool calls, sir — that's my per-turn limit.",
                 )
             if _messages_tokens(messages) > TOKEN_BUDGET:
                 self._truncate(messages)
