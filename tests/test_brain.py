@@ -880,3 +880,26 @@ def test_cloud_self_critique_redacts_original_user_text(fake_dcl_module):
     assert "sk-abc123" not in llm.prompts[1][0]["content"]
     assert "[REDACTED:SECRET]" in llm.prompts[1][0]["content"]
 
+
+
+def test_large_tool_output_is_bounded_before_next_model_call():
+    huge_output = "x" * 12000
+    llm = ScriptedLLM([
+        "TOOL: get_time\\nARGS: {}",
+        "The tool returned data, but its output was truncated.",
+    ])
+    brain = make_brain(
+        llm,
+        tools=[ToolDef(name="get_time", description="Returns a large payload.",
+                       parameters={}, fn=lambda args: huge_output)],
+    )
+
+    result = brain.respond("s1", "run the tool")
+
+    assert result.status == "answered"
+    tool_message = next(
+        message for message in llm.prompts[1]
+        if message.get("role") == "tool" and message.get("name") == "get_time"
+    )
+    assert "[TRUNCATED: omitted 4000 characters of tool output]" in tool_message["content"]
+    assert "x" * 9000 not in tool_message["content"]
