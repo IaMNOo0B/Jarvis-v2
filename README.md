@@ -33,9 +33,10 @@ JARVIS checks for the model configured in `data/config.yaml` under
 `brain.ollama_model`. If your installed Ollama model has a different name,
 set that field to the exact name shown by `ollama list`. The
 `brain.ollama_base_url` setting defaults to `http://localhost:11434`.
-Use `/status` in the chat to see whether Ollama is reachable, which providers
-are configured, whether learning/self-critique are enabled, and how many web
-notes have been saved. The report never prints API-key values.
+Use `/status` in the chat to see Ollama's startup health, providers in the
+fallback chain (which are not all independently health-checked), the last
+provider used, memory/capture settings, self-critique, and saved web notes.
+The report never prints API-key values.
 
 ### Option B — Cloud provider with an API key
 
@@ -54,10 +55,13 @@ third-party model.
 
 ## Learning and self-improvement
 
-JARVIS can now keep a local episodic memory of answered turns and retrieve
-relevant snippets in later conversations. Obvious credential-like text is
-skipped, but this is a heuristic—not a guarantee—so avoid entering passwords,
-API keys, or highly sensitive information.
+JARVIS can retrieve relevant local memory snippets during later conversations.
+Automatic saving of conversation episodes is **off by default** because
+privacy filters are heuristic, not a guarantee. To opt in, set
+`learning.auto_episode_capture: true` in `data/config.yaml`. Even with the
+filter enabled, do not enter passwords, API keys, private contact details, or
+other highly sensitive information. Retrieved memory is passed as untrusted
+evidence, not inserted into the system instructions.
 
 For internet research, ask JARVIS to **"learn about [topic] and save the sources"**.
 It can use `web_learn` to fetch and save up to three pages under the local
