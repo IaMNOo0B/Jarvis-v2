@@ -145,8 +145,8 @@ class StubLLM:
 # --------------------------------------------------------------------------- #
 
 # Turn allowances (policy, never the brain's choice):
-# reads auto-allowed; file writes allowed by capability (tier-2 still
-# announces + undo); network/exec/clipboard NOT granted in Wave 1.
+# reads auto-allowed; file writes use the tier-2 undo path; outbound network
+# is limited to declared web tools, and code execution remains tier-3 gated.
 # Web reads need net.outbound; sandboxed code execution needs exec and still
 # passes the tier-3 approval gate. The code sandbox itself blocks networking.
 TURN_ALLOWANCES = ["fs.read", "fs.write", "time.read", "net.outbound", "exec"]
