@@ -102,14 +102,14 @@ def test_hook_fires_when_should_run_true(app, monkeypatch):
     monkeypatch.setattr(evo, "run_review", fake_run_review)
     rec = BrainRecorder()
     app.brain.respond = rec
-    app.turn("hello")
+    app.turn("tell me something")
     assert "args" in seen
     data_dir, store, memory, now = seen["args"]
     assert data_dir == app.data_dir
     assert store is app.store
     assert memory is app.memory
     assert now is not None
-    assert rec.calls == ["hello"]  # the turn itself still ran
+    assert rec.calls == ["tell me something"]  # the turn itself still ran
 
 
 def test_hook_silent_when_should_run_false(app, monkeypatch):
@@ -120,9 +120,9 @@ def test_hook_silent_when_should_run_false(app, monkeypatch):
         lambda *a, **k: called.append(True))
     rec = BrainRecorder()
     app.brain.respond = rec
-    app.turn("hello")
+    app.turn("tell me something")
     assert called == []
-    assert rec.calls == ["hello"]
+    assert rec.calls == ["tell me something"]
     assert not (app.data_dir / "evolution").exists()
 
 
@@ -134,7 +134,7 @@ def test_raising_review_never_breaks_turn(app, monkeypatch, capsys):
     monkeypatch.setattr(evo, "run_review", boom)
     rec = BrainRecorder()
     app.brain.respond = rec
-    app.turn("hello")  # must not raise
+    app.turn("tell me something")  # must not raise
     out = capsys.readouterr().out
     assert "brain handled it, sir." in out
     assert "[error]" not in out
