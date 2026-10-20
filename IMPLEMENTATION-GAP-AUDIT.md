@@ -8,7 +8,7 @@
 
 The repository is a meaningful Python prototype with a real chat loop, provider fallback, manifest-based skills, a safety gate, SQLite memory/session storage, a Tkinter GUI, and optional desktop/phone/voice modules. It is not yet the complete product described by the knowledge book. Passing unit tests proves the tested code paths, not that the installed model, Windows UI automation, or the full user journey works on Sir's PC.
 
-The latest Windows CI run for this branch reports **566 passed, 3 skipped**. The tests use fakes/mocks for external models, web calls, and platform-sensitive behavior; this is not a real-model or real-desktop acceptance test.
+An earlier Windows CI run on a prior head reported **566 passed, 3 skipped**. The latest memory-safety/routing changes are being re-tested; tests use fakes/mocks for external models, web calls, and platform-sensitive behavior, so even a green CI run is not a real-model or real-desktop acceptance test.
 
 ## Important mismatch in the source documents
 
