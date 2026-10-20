@@ -52,6 +52,7 @@ MAX_TOOL_CALLS = 12     # max tool executions per turn (hard cap)
 MAX_CONSECUTIVE_FAILURES = 2   # 2-attempt rule: 2 failed tool attempts -> honest stop
 TOKEN_BUDGET = 4000     # 4k-physical strategy (brain-spec §5)
 FALLBACK_TIMEOUT = 5.0  # seconds; no blocking network beyond this in failure paths
+MAX_TOOL_OUTPUT_CHARS = 8000  # bound untrusted tool data before it enters model context
 
 
 # --------------------------------------------------------------------------- #
@@ -720,6 +721,16 @@ class Brain:
                                              else json.dumps(raw_out, default=str))
                 except Exception as exc:
                     ok, content = False, f"error: tool '{name}' raised: {exc}"
+                # Tool output is untrusted and may be unexpectedly huge. Bound
+                # what enters both the event log and the next model prompt.
+                # Keep a visible marker so truncation cannot be mistaken for
+                # a complete file, search result, or command output.
+                if len(content) > MAX_TOOL_OUTPUT_CHARS:
+                    omitted_chars = len(content) - MAX_TOOL_OUTPUT_CHARS
+                    content = (
+                        content[:MAX_TOOL_OUTPUT_CHARS]
+                        + f"\\n[TRUNCATED: omitted {omitted_chars} characters of tool output]"
+                    )
                 self._log(session_id, "tool.result",
                           {"ok": ok, "output": content[:2000]},
                           causal_parent=call_ev, actor="tool",
