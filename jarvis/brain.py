@@ -550,6 +550,17 @@ class Brain:
                              "tool_calls": [{"name": n, "args": a} for n, a in payload]
                              if kind == "tools" else []})
             if kind == "answer":
+                # A failed tool cannot be converted into a claimed completion.
+                # This is status-based enforcement, not keyword detection. The
+                # model may explain the failure only after a successful recovery
+                # action; otherwise stop with the recorded failure.
+                if last_action_issue:
+                    return self._honest_stop(
+                        session_id, last_parent, tool_calls_made, rounds, messages,
+                        "I couldn't verify completion, sir, because "
+                        f"{last_action_issue}. I won't report success without "
+                        "a successful tool result.",
+                    )
                 # Constitutional self-critique: check the draft against the
                 # rules before delivering. One extra LLM call; fail-open.
                 final_text = payload
@@ -578,22 +589,7 @@ class Brain:
                                       causal_parent=last_parent)
                     except Exception:
                         pass  # Critique never blocks the answer.
-                # Deterministic honesty guard: do not claim an action completed when
-                # the most recent action failed or was denied and no later tool
-                # succeeded. Run AFTER critique so it cannot reintroduce the claim.
-                if last_action_issue and re.search(
-                    r"\b(done|completed|successfully|success|created|saved|sent|deleted|installed|opened|finished|updated|fixed)\b",
-                    final_text, re.IGNORECASE,
-                ):
-                    final_text = (
-                        "I can't honestly say that task is complete, sir. "
-                        f"The last action did not succeed: {last_action_issue}. "
-                        "Nothing after that failure verified completion."
-                    )
-                    self._log(session_id, "brain.completion_claim_blocked",
-                              {"reason": last_action_issue},
-                              causal_parent=last_parent)
-                self._log(session_id, "brain.reply", {"text": final_text},
+remove keyword detector                self._log(session_id, "brain.reply", {"text": final_text},
                           causal_parent=last_parent, actor="brain",
                           trust="user")
                 if self.auto_learn and self._episode_capture_is_safe(user_text, final_text):
@@ -629,10 +625,6 @@ class Brain:
                          "reason": getattr(decision, "reason", "")},
                         causal_parent=last_parent)
                     last_parent = call_ev
-                    last_action_issue = (
-                        f"the Gate denied {name}: "
-                        f"{getattr(decision, 'reason', 'not allowed')}"
-                    )
                     # Transient tool message — never a fake user turn.
                     messages.append({"role": "tool", "name": name,
                                      "content": f"error: the gate denied this call "
