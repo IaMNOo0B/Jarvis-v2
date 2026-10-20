@@ -82,6 +82,19 @@ def _simple_chat_reply(text: str) -> str | None:
     return None
 
 
+def _ordered_providers(ollama_provider, keyed, omni_provider, poll_provider) -> list:
+    """Return the documented provider order without relying on argument position."""
+    providers = []
+    if ollama_provider is not None:
+        providers.append(ollama_provider)
+    providers.extend(keyed or [])
+    if omni_provider is not None:
+        providers.append(omni_provider)
+    if poll_provider is not None:
+        providers.append(poll_provider)
+    return providers
+
+
 def startup_warnings(data_dir: Path) -> list[str]:
     """Non-fatal first-run warnings (F-13). Checked separately from
     preflight because they advise, not refuse."""
@@ -427,14 +440,8 @@ class ChatApp:
         # keyed cloud providers, then OmniRoute, then keyless Pollinations.
         # Do not call local_first(*providers) with keyed providers first:
         # local_first treats its FIRST argument as the local provider.
-        providers = []
-        if ollama_provider is not None:
-            providers.append(ollama_provider)
-        providers.extend(keyed)
-        if omni_provider is not None:
-            providers.append(omni_provider)
-        if poll_provider is not None:
-            providers.append(poll_provider)
+        providers = _ordered_providers(
+            ollama_provider, keyed, omni_provider, poll_provider)
         if providers:
             chain = FallbackChain(providers)
             llm_call = chain_as_llm_call(chain)
