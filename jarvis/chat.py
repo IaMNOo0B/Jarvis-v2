@@ -195,6 +195,8 @@ class ChatApp:
                 "max_rounds": Field(int, 5, min=1, max=10),
                 "max_tool_calls": Field(int, 12, min=1, max=50),
                 "self_critique": Field(bool, True),
+                "ollama_model": Field(str, "qwen2.5:7b-instruct-q4_K_M"),
+                "ollama_base_url": Field(str, "http://localhost:11434"),
                 "omniroute_model": Field(str, "google/gemini-2.5-flash"),
             },
             "learning": {
@@ -293,13 +295,19 @@ class ChatApp:
         from jarvis.brain import FallbackChain, chain_as_llm_call
         from jarvis.llm_ollama import make_llm_call, OllamaProvider, OllamaCall
         ollama_provider = None
+        ollama_model = self.config.get(
+            "brain.ollama_model", "qwen2.5:7b-instruct-q4_K_M")
+        ollama_base_url = self.config.get(
+            "brain.ollama_base_url", "http://localhost:11434")
         try:
-            ollama_call = OllamaCall(rules=self.rules)
-            ok, _ = ollama_call.check_health()
+            ollama_call = OllamaCall(
+                base_url=ollama_base_url, model=ollama_model, rules=self.rules)
+            ok, ollama_status = ollama_call.check_health()
+            print(f"[llm] {ollama_status}")
             if ok:
                 ollama_provider = OllamaProvider(ollama_call)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(f"[llm] Ollama check failed: {exc}")
         omni_provider = None
         try:
             from jarvis.llm_omniroute import make_omniroute_call, OmniRouteProvider
