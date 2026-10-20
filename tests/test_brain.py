@@ -230,8 +230,10 @@ def test_gate_deny_never_executes_tool():
                                       fn=lambda a: executed.append(a) or "x")])
     result = brain.respond("s1", "do the secret thing")
     assert executed == []
-    assert result.status == "answered"
-    assert "won't do that" in result.text
+    assert result.status == "stopped"
+    assert "couldn't verify completion" in result.text
+    assert "not permitted" in result.text
+    assert "won't do that" not in result.text
 
 
 def test_two_failed_attempts_honest_stop():
