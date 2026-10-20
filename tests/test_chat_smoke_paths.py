@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from jarvis.chat import ChatApp, _is_simple_greeting, _simple_chat_reply
+from jarvis.chat import (ChatApp, _is_simple_greeting, _simple_chat_reply,\n                         _ordered_providers)
 
 
 def test_standalone_greetings_are_provider_independent():
@@ -200,3 +200,23 @@ def test_builtin_system_grammar_matches_plain_english_app_commands():
     assert youtube is not None and youtube.fuzzy is False
     assert youtube.skill == "system" and youtube.tool == "launch_app"
     assert youtube.args == {"app": "youtube"}
+
+
+
+def test_provider_order_prefers_healthy_local_before_cloud_fallbacks():
+    local = SimpleNamespace(name="ollama")
+    cloud = [SimpleNamespace(name="groq"), SimpleNamespace(name="gemini")]
+    gateway = SimpleNamespace(name="omniroute")
+    keyless = SimpleNamespace(name="pollinations")
+
+    ordered = _ordered_providers(local, cloud, gateway, keyless)
+    assert [provider.name for provider in ordered] == [
+        "ollama", "groq", "gemini", "omniroute", "pollinations"
+    ]
+
+
+def test_provider_order_still_works_when_local_provider_is_unavailable():
+    cloud = [SimpleNamespace(name="groq")]
+    keyless = SimpleNamespace(name="pollinations")
+    ordered = _ordered_providers(None, cloud, None, keyless)
+    assert [provider.name for provider in ordered] == ["groq", "pollinations"]
