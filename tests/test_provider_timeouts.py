@@ -1,5 +1,6 @@
 """Regression tests for provider-specific timeout propagation."""
 
+from jarvis.brain import FallbackChain
 from jarvis.llm_omniroute import OmniRouteProvider
 from jarvis.llm_pollinations import PollinationsProvider
 
@@ -32,3 +33,26 @@ def test_omniroute_keeps_its_configured_timeout():
                             timeout=provider.timeout) == "ok"
     assert call.seen_timeout == 35.0
     assert call.timeout == 35.0
+
+
+
+def test_fallback_chain_uses_pollinations_timeout_instead_of_global_five_seconds():
+    call = FakeCall(timeout=60.0)
+    provider = PollinationsProvider(call)
+    result = FallbackChain([provider], timeout=5.0,
+                           transient_retries=0).respond(
+        [{"role": "user", "content": "hello"}])
+    assert result["ok"] is True
+    assert result["via"] == "pollinations"
+    assert call.seen_timeout == 60.0
+
+
+def test_fallback_chain_uses_omniroute_timeout_instead_of_global_five_seconds():
+    call = FakeCall(timeout=35.0)
+    provider = OmniRouteProvider(call)
+    result = FallbackChain([provider], timeout=5.0,
+                           transient_retries=0).respond(
+        [{"role": "user", "content": "hello"}])
+    assert result["ok"] is True
+    assert result["via"] == "omniroute"
+    assert call.seen_timeout == 35.0
