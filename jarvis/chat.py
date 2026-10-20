@@ -739,7 +739,7 @@ class ChatApp:
         # Explicit search commands have a deterministic tool + argument.
         # Grant net.outbound only for this user-requested search, then restore
         # the normal turn allowances immediately after gated dispatch.
-        normalized = re.sub(r"[^a-z0-9\s:/._-]", "", (text or "").lower())
+        normalized = re.sub(r"[^\w\s:/.-]", "", (text or "").lower(), flags=re.UNICODE)
         normalized = " ".join(normalized.split())
         query = None
         for prefix in ("search the internet for ", "search internet for ",
