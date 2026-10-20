@@ -64,6 +64,24 @@ def _is_simple_greeting(text: str) -> bool:
     }
 
 
+def _simple_chat_reply(text: str) -> str | None:
+    """Answer common social turns without asking a tool planner to guess."""
+    normalized = re.sub(r"[^a-z0-9\\s]", "", (text or "").lower()).strip()
+    normalized = " ".join(normalized.split())
+    if _is_simple_greeting(normalized):
+        return "Hello, Sir. I'm here and ready to help."
+    if normalized in {
+        "how are you", "how are u", "how r you", "how r u",
+        "how are you doing", "how are you jarvis", "whats up",
+    }:
+        return "I'm doing well, Sir, and ready to help. How are you?"
+    if normalized in {"no", "nope", "nah", "not now"}:
+        return "No problem, Sir. What would you like to do next?"
+    if normalized in {"thanks", "thank you", "thanks jarvis", "thank you jarvis"}:
+        return "You're welcome, Sir."
+    return None
+
+
 def startup_warnings(data_dir: Path) -> list[str]:
     """Non-fatal first-run warnings (F-13). Checked separately from
     preflight because they advise, not refuse."""
@@ -405,18 +423,20 @@ class ChatApp:
             keyed = make_compat_providers(data_dir=str(self.data_dir))
         except Exception:
             pass
-        # Order: keyed cloud (smartest) -> Ollama local -> OmniRoute ->
-        # keyless Pollinations. The owner's keys win when they exist.
+        # Deterministic order: local Ollama first (when healthy), then
+        # keyed cloud providers, then OmniRoute, then keyless Pollinations.
+        # Do not call local_first(*providers) with keyed providers first:
+        # local_first treats its FIRST argument as the local provider.
         providers = []
-        providers.extend(keyed)
         if ollama_provider is not None:
             providers.append(ollama_provider)
+        providers.extend(keyed)
         if omni_provider is not None:
             providers.append(omni_provider)
         if poll_provider is not None:
             providers.append(poll_provider)
         if providers:
-            chain = FallbackChain.local_first(*providers)
+            chain = FallbackChain(providers)
             llm_call = chain_as_llm_call(chain)
             # F-08: keep the chain so the GUI pill can read last_via.
             self._chain: "FallbackChain | None" = chain
@@ -707,6 +727,39 @@ class ChatApp:
         parameter, and inventing one is a brain change, not wiring.
         Routing failures degrade to None: routing NEVER breaks a turn.
         """
+        from types import SimpleNamespace
+
+        # Explicit search commands have a deterministic tool + argument.
+        # Grant net.outbound only for this user-requested search, then restore
+        # the normal turn allowances immediately after gated dispatch.
+        normalized = re.sub(r"[^a-z0-9\\s:/._-]", "", (text or "").lower())
+        normalized = " ".join(normalized.split())
+        query = None
+        for prefix in ("search the internet for ", "search internet for ",
+                       "search for ", "search ", "look up ", "google "):
+            if normalized.startswith(prefix):
+                query = normalized[len(prefix):].strip()
+                break
+        if query:
+            query = re.sub(r"\\s+(?:on|over)\\s+(?:the\\s+)?internet$", "", query).strip()
+            if query:
+                search_match = SimpleNamespace(
+                    skill="web", tool="web_search",
+                    args={"query": query, "max_results": 5},
+                    fuzzy=False, confidence=1.0)
+                if self._is_real_skill_tool(search_match):
+                    previous_allowances = self._allowances
+                    self._allowances = list(dict.fromkeys(
+                        [*previous_allowances, "net.outbound"]))
+                    try:
+                        return self._dispatch_routed(text, search_match)
+                    except Exception as exc:
+                        print(f"[router] search dispatch failed: "
+                              f"{type(exc).__name__}: {exc}")
+                        return None
+                    finally:
+                        self._allowances = previous_allowances
+
         router = getattr(self, "router", None)
         if router is None:
             return None
@@ -717,27 +770,39 @@ class ChatApp:
         if match is None or match.fuzzy or match.confidence < 1.0:
             return None  # fuzzy args are provisional — the LLM's turn
         if not self._is_real_skill_tool(match):
-            # A concrete, exact app-launch phrase is safe to route directly
-            # because pc.launch_app still passes through the normal Gate.
-            # This makes 'Chrome kholo' work even when every LLM provider
-            # is down; the Gate remains responsible for tier/approval.
+            # Exact app/site requests still pass through the same Gate.
             if (match.skill == "system" and match.tool == "launch_app"
                     and self._pc is not None):
                 app_name = str((match.args or {}).get("app", "")).strip()
                 if not app_name:
                     return None
-                from types import SimpleNamespace
-                match = SimpleNamespace(
-                    skill="pc", tool="pc.launch_app",
-                    args={"name": app_name}, fuzzy=False, confidence=1.0)
+                sites = {
+                    "youtube": "https://www.youtube.com/",
+                    "google": "https://www.google.com/",
+                    "gmail": "https://mail.google.com/",
+                    "github": "https://github.com/",
+                    "chatgpt": "https://chatgpt.com/",
+                    "reddit": "https://www.reddit.com/",
+                    "instagram": "https://www.instagram.com/",
+                    "facebook": "https://www.facebook.com/",
+                }
+                normalized_app = " ".join(app_name.lower().split())
+                if normalized_app in sites:
+                    match = SimpleNamespace(
+                        skill="pc", tool="pc.open_url",
+                        args={"url": sites[normalized_app]},
+                        fuzzy=False, confidence=1.0)
+                else:
+                    match = SimpleNamespace(
+                        skill="pc", tool="pc.launch_app",
+                        args={"name": app_name}, fuzzy=False, confidence=1.0)
             else:
                 return None  # other virtual intents remain model-mediated
         try:
             return self._dispatch_routed(text, match)
         except Exception as exc:
-            # Do not silently turn a failed deterministic action into a
-            # generic LLM reply; that hid the exact reason "open Chrome"
-            # fell through to the model.
+            # Preserve the actual failure rather than silently disguising it
+            # as a generic model reply.
             print(f"[router] dispatch failed for {match.tool}: "
                   f"{type(exc).__name__}: {exc}")
             return None
@@ -1104,11 +1169,11 @@ class ChatApp:
 
     def turn(self, text: str) -> None:
         self._turn_id += 1
-        # A standalone greeting must not depend on cloud/local model health.
-        # Persist it as a normal exchange when possible, but never make the
-        # greeting itself depend on the session logger.
-        if _is_simple_greeting(text):
-            reply = "Hello, Sir. I'm here and ready to help."
+        # Common social turns should not enter the tool planner. This also
+        # keeps a broken provider from turning "how are you?" into a finance task.
+        simple_reply = _simple_chat_reply(text)
+        if simple_reply is not None:
+            reply = simple_reply
             user_event = None
             try:
                 user_event = self.store.emit(
@@ -1319,6 +1384,18 @@ class ChatApp:
             return self._pc.type_into_field(args["element_id"], args.get("text", ""))
         if op == "key":
             return self._pc.press_key(args.get("key", ""))
+        if op == "launch_app":
+            return self._pc.launch_app(args["name"])
+        if op == "open_url":
+            url = str(args.get("url", "")).strip()
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError("only complete HTTP/HTTPS URLs can be opened")
+            import webbrowser
+            if not webbrowser.open(url, new=2):
+                raise RuntimeError("Windows did not confirm that the browser opened")
+            return {"ok": True, "url": url, "detail": "opened in the default browser"}
         if op == "ground":
             return self._pc.ground_target(args["query"])
         raise RuntimeError(f"unknown pc op: {op}")
