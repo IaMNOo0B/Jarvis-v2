@@ -963,7 +963,7 @@ class ChatApp:
                 title = str(item.get("title") or "Untitled result").strip()
                 url = str(item.get("url") or "").strip()
                 lines.append(f"- {title}" + (f" — {url}" if url else ""))
-            return "Here are the web results, sir:\\n" + "\\n".join(lines)
+            return "Here are the web results, sir:\n" + "\n".join(lines)
         if data.get("ok") is False:
             return (f"That didn't work, sir: "
                     f"{data.get('error', data.get('reason', 'unknown error'))}")
