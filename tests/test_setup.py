@@ -442,3 +442,50 @@ def test_desktop_chat_grants_web_and_approved_sandbox_capabilities():
     # PC shell execution remains a distinct capability added only when PC control is enabled.
     assert "shell.exec" not in TURN_ALLOWANCES
 
+def test_approved_pc_shell_routes_to_terminal_controller():
+    from jarvis.chat import ChatApp
+
+    class FakePC:
+        def __init__(self):
+            self.commands = []
+
+        def run_in_terminal(self, command):
+            self.commands.append(command)
+            return {"ok": True, "detail": "exit 0"}
+
+    app = ChatApp.__new__(ChatApp)
+    app._pc = FakePC()
+
+    result = app._pc_call("pc.shell", {"command": "echo safe-test"})
+
+    assert result["ok"] is True
+    assert app._pc.commands == ["echo safe-test"]
+
+
+def test_approved_sandbox_tool_passes_only_the_matching_tier3_action(tmp_path):
+    from jarvis.chat import ChatApp
+    from jarvis.gate import GateDecision, Verdict
+
+    class FakeRegistry:
+        def dispatch(self, tool_name, args, ctx, risk_gate):
+            allowed = risk_gate(tool_name, 3, args, ctx)
+            return ({"ok": True, "result": "executed"} if allowed else
+                    {"ok": False, "code": "gate_denied", "message": "denied"})
+
+    class FakeGate:
+        def check(self, tool_name, args, allowances):
+            return GateDecision(Verdict.REQUIRE_APPROVAL, "approval required")
+
+    app = ChatApp.__new__(ChatApp)
+    app._pc = None
+    app.registry = FakeRegistry()
+    app.gate = FakeGate()
+    app._Verdict = Verdict
+    app._allowances = ["fs.read", "exec"]
+    app.data_dir = tmp_path
+    app._turn_id = 1
+
+    result = app._executor_approved("code_run", {"code": "print(1)"})
+
+    assert result == "executed"
+
