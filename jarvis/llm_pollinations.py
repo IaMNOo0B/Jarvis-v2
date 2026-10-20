@@ -107,6 +107,10 @@ class PollinationsProvider:
         self._call = call
         self.name = name
         self.keys: List[str] = []  # keyless — nothing to rotate
+        # Preserve the provider's configured network timeout. Without this,
+        # FallbackChain's 5s default overwrites PollinationsCall.TIMEOUT (60s)
+        # and makes a healthy but slower free model look exhausted.
+        self.timeout = call.timeout
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:
