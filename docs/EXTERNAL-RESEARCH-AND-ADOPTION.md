@@ -67,7 +67,7 @@ This document records public-source research that can guide JARVIS. It is not a 
 ### Adopt now
 
 1. **Honest action outcomes:** unresolved failed or Gate-denied actions must block a final success claim. A recovery only clears a failure when the same tool with the same arguments succeeds.
-2. **Evidence-first research:** preserve source URLs, retrieval time, hashes, untrusted-source labels, and a concise statement of what was actually observed. Mark inference and uncertainty separately.
+2. **Evidence-first research and execution:** preserve source URLs, retrieval time, hashes, and untrusted-source labels. Tool-result events now explicitly label the result as tool-reported success/failure and set postcondition_verified=false; they do not pretend that a return value proves an external side effect. Mark inference and uncertainty separately.
 3. **Diagnostics without side effects:** report readiness and missing dependencies before attempting setup or execution.
 4. **Safe setup/update:** preview changed files/configuration, back up prior state, validate before activation, and provide rollback guidance.
 5. **Capability visibility:** expose which providers, skills, permissions, and desktop-control features are genuinely available rather than implying that every feature works.
