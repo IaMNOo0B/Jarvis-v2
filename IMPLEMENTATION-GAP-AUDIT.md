@@ -22,7 +22,7 @@ An earlier Windows CI run on a prior head reported **566 passed, 3 skipped**. Th
 | Area | Current evidence in repository | What still needs to happen |
 |---|---|---|
 | Chat and provider fallback | jarvis/chat.py, jarvis/brain.py, Ollama/cloud provider adapters, /status; local Ollama is now ordered before cloud fallbacks | Verify on Sir's PC that the configured Ollama model name exists, the provider actually answers, fallback works during a real outage, and responses are not silently coming from the stub |
-| Request fulfillment / tools | Manifest-driven skills, schema validation, Gate, approvals, code/notes/clock/web/knowledge skills, PC-control tool definitions | Add an end-to-end acceptance suite for natural-language requests → correct tool → observed result → truthful final response; exercise multi-step tasks, failures, retries, and STOP |
+| Request fulfillment / tools | Manifest-driven skills, schema validation, Gate, approvals, code/notes/clock/web/knowledge skills, PC-control tool definitions; Brain now treats registry-style `{ok:false,...}` results as failures and counts every actual execution attempt against the hard cap | Add a real-provider acceptance suite for natural-language requests → correct tool → observable result → truthful final response; exercise multi-step tasks, failures, retries, and STOP on Windows |
 | Internet research | web_search, web_fetch, web_learn, learning_search; web notes include source URLs, retrieval time, hashes, and untrusted-source labels; private/local destinations are blocked in URL validation | Test real public websites and redirects on Windows; add source-quality/conflict handling, clear citations in answers, and size/rate limits for repeated research |
 | Learning / memory | SQLite facts + episodes, full-text recall, provenance/quarantine for facts; recalled snippets are now passed as explicitly untrusted tool evidence, not injected into system instructions. Automatic episode capture is opt-in and off by default; conservative filters skip obvious credentials, contact identifiers, and some injection patterns | The filter is not a privacy guarantee. Add user-reviewed capture/retention controls, provenance for episodes, and tested episode deletion/forgetting before broadening automatic capture |
 | Self-critique | Existing critique module is now enabled through config for longer answers | Test whether it catches factual/tool-result errors and does not rewrite correct answers into worse ones; keep a bounded retry/call budget |
@@ -41,7 +41,7 @@ An earlier Windows CI run on a prior head reported **566 passed, 3 skipped**. Th
 1. Fix stale documentation and keep the repo's status map aligned with actual code.
 2. Keep automatic episode capture opt-in by default; recalled memory is untrusted evidence, never system instructions. Continue adding privacy, retention, provenance, and deletion controls.
 3. Make /status distinguish the provider chain from the provider that actually answered the last turn; clearly label stub/degraded mode.
-4. Ensure every tool result is treated as untrusted evidence, every side effect passes through the Gate, and failures are never reported as success.
+4. Ensure every tool result is treated as untrusted evidence, every side effect passes through the Gate, structured tool failures count as failures, and failed tasks are never reported as success.
 
 ### P1 — Prove the core assistant end to end
 1. Test real Ollama connectivity and exact installed-model selection on Windows.
