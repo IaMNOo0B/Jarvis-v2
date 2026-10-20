@@ -385,6 +385,35 @@ def test_same_tool_with_different_arguments_does_not_clear_failure():
     assert "saved successfully" not in result.text
 
 
+def test_retrying_one_of_multiple_failed_actions_does_not_clear_the_other():
+    attempts = {"first.txt": 0, "second.txt": 0}
+
+    def _write(args):
+        path = args.get("path")
+        attempts[path] += 1
+        if path == "first.txt" and attempts[path] == 2:
+            return {"ok": True, "result": "first file saved"}
+        return {"ok": False, "error": f"write failed for {path}"}
+
+    llm = ScriptedLLM([
+        "TOOL: write_file\nARGS: {\"path\": \"first.txt\"}",
+        "TOOL: write_file\nARGS: {\"path\": \"second.txt\"}",
+        "TOOL: write_file\nARGS: {\"path\": \"first.txt\"}",
+        "The files were saved successfully.",
+    ])
+    brain = make_brain(
+        llm,
+        tools=[ToolDef(name="write_file", description="Write a file.",
+                       parameters={}, fn=_write)],
+    )
+
+    result = brain.respond("s1", "save first.txt and second.txt")
+
+    assert result.status == "stopped"
+    assert "second.txt" in result.text
+    assert "saved successfully" not in result.text
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
