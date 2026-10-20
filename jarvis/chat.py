@@ -1694,6 +1694,12 @@ class ChatApp:
         """Handle /commands. Returns True if text was a command (so the
         caller must NOT send it to the brain). The GUI and CLI both call
         this — a /key pasted in the window can never reach the brain."""
+        text = (text or "").strip()
+        if text.startswith("/"):
+            # Command names are case-insensitive, while argument values
+            # (including API keys) retain their original case.
+            parts = text.split(None, 1)
+            text = parts[0].lower() + (" " + parts[1] if len(parts) > 1 else "")
         if text == "/quit":
             print("[stopped] Session saved. Goodbye, sir.")
             return True
@@ -1926,7 +1932,7 @@ class ChatApp:
                 break
             if not text:
                 continue
-            if text == "/quit":
+            if text.lower() == "/quit":
                 break
             if self.handle_command(text):
                 continue
