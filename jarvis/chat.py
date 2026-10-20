@@ -427,6 +427,50 @@ class ChatApp:
             "- Internet research tools: web_search, web_fetch, web_learn, learning_search (availability depends on provider/network)",
         ])
 
+    def doctor_report(self) -> str:
+        """Read-only readiness diagnostics; never installs, repairs, or phones home."""
+        chain = getattr(self, "_chain", None)
+        providers = [getattr(p, "name", "unknown")
+                     for p in getattr(chain, "providers", [])]
+        if not providers:
+            providers = ["stub (no real provider connected)"]
+
+        records = getattr(getattr(self, "registry", None), "_records", {})
+        try:
+            skill_names = sorted(records)
+            quarantined = sum(1 for rec in records.values()
+                              if not getattr(rec, "approved", False))
+        except Exception:
+            skill_names, quarantined = [], 0
+
+        data_dir = Path(getattr(self, "data_dir", "."))
+        learned_dir = data_dir / "learned"
+        try:
+            learned_count = sum(1 for p in learned_dir.glob("*.md") if p.is_file())
+        except OSError:
+            learned_count = 0
+        try:
+            data_writable = data_dir.is_dir() and os.access(data_dir, os.W_OK)
+        except OSError:
+            data_writable = False
+
+        pc = getattr(self, "_pc", None)
+        ollama = getattr(self, "_ollama_status", "not checked")
+        memory = "available" if getattr(self, "memory", None) is not None else "unavailable"
+        return "\\n".join([
+            "JARVIS doctor (read-only; no repairs or installs performed):",
+            f"- Brain provider chain: {', '.join(providers)}",
+            f"- Last response provider: {getattr(self, 'last_provider', 'unknown')}",
+            f"- Ollama startup check: {ollama}",
+            f"- Registered skills: {len(skill_names)}",
+            f"- Quarantined skills: {quarantined}",
+            f"- PC control: {'initialized' if pc is not None else 'not initialized'}",
+            f"- Memory subsystem: {memory}",
+            f"- Saved research notes: {learned_count}",
+            f"- Data directory writable: {'yes' if data_writable else 'no / unavailable'}",
+            "Next step: use the specific failed check above; this command does not change your PC.",
+        ])
+
     @property
     def last_provider(self) -> str:
         """F-08: which brain answered the last turn?
@@ -750,8 +794,11 @@ class ChatApp:
         if text == "/status":
             print(self.status_report())
             return True
+        if text == "/doctor":
+            print(self.doctor_report())
+            return True
         if text == "/help":
-            print("Commands: /quit, /status (provider + learning health), /session (show session id), "
+            print("Commands: /quit, /status (provider + learning health), /doctor (read-only readiness checks), /session (show session id), 
                   "/skills (list), /memory <fact> (remember), /recall <q>, "
                   "/key <paste-your-key> (store API key), /keys (list), "
                   "/keymove <wrong> <right> (fix misidentified key), "
