@@ -62,6 +62,28 @@ This document records public-source research that can guide JARVIS. It is not a 
   - "Local-first" must not be confused with "fully offline": its README states that text/context or screen images are sent to Gemini when Gemini is enabled.
   - Browser and screen actions need visible state, permission boundaries, and explicit confirmations for risky actions.
 
+## Code-level follow-up inspection
+
+The initial README-level survey was followed by targeted inspection of selected implementation files. These findings are narrower than a full repository audit.
+
+### Dodaios recovery and approvals
+
+- `dodaios/agent_chat/task_recovery.py` correlates tool calls/results by call ID, hashes canonical arguments to identify the exact action, tracks unresolved failures independently, and blocks automatic recovery for terminal conditions such as permission denial, authentication failure, quota/rate limits, or explicit user decline.
+- Its module documentation limits the CLI recovery hint to one continuation of the same request, on the same seat and with the same grants. It explicitly avoids using the assistant's final wording or passing arbitrary tool output into a recovery prompt as the source of truth.
+- JARVIS now uses SHA-256 fingerprints of canonical tool arguments for its in-memory unresolved-action identity, so raw arguments are not retained in that tracking map. This is not a guarantee that arguments are absent from the event log or every other component; the broader logging/privacy review remains open.
+- `docs/product/privacy-safety-and-support/safety-and-approvals.md` documents a single central gate, deny-rule precedence, exact-call approval, and the important limitation that the gate is not a universal OS sandbox. JARVIS should retain its own Gate as the enforcement point and never treat a green test or Gate approval as a sandbox guarantee.
+
+### Dodaios knowledge curation
+
+- `dodaios/memory/wiki/cli.py` exposes a `--dry-run` mode that shows proposed knowledge updates without writing them.
+- Adoption decision: setup and self-update workflows in JARVIS should eventually offer a reviewable preview, backup, test-before-activation, and rollback. The new `/doctor` command is read-only; it does not yet implement update previews or rollback.
+
+### Opengeni durable tool settlement
+
+- `packages/db/src/session-tool-call-settlement.ts` distinguishes calls proven never started from started calls whose durable outcome is unknown, and builds provider-valid result records for those different states.
+- `docs/session-usage-limits.md` describes usage accounting as durable, identity-based settlement rather than a loose counter.
+- Adoption decision: JARVIS should distinguish `not_started`, `failed`, `succeeded`, and `outcome_unknown` for side effects. The current tool evidence event records only what a tool returned and deliberately leaves `postcondition_verified=false`; durable idempotent settlement/recovery remains unfinished.
+
 ## Decisions for this repository
 
 ### Adopt now
