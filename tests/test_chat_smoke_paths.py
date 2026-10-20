@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from jarvis.chat import ChatApp, _is_simple_greeting
+from jarvis.chat import ChatApp, _is_simple_greeting, _simple_chat_reply
 
 
 def test_standalone_greetings_are_provider_independent():
@@ -89,3 +89,59 @@ def test_reminder_grammar_covers_common_natural_phrasing():
     listed = router.route("is there any reminder set")
     assert listed is not None and listed.fuzzy is False
     assert listed.tool == "reminder_list"
+
+
+
+def test_common_smalltalk_does_not_reach_the_model_planner():
+    assert "doing well" in _simple_chat_reply("how are u?")
+    assert "No problem" in _simple_chat_reply("no")
+    assert _simple_chat_reply("search for Jarvis") is None
+
+
+def test_explicit_internet_search_routes_to_web_search_with_scoped_network_access():
+    app = object.__new__(ChatApp)
+    app._allowances = ["fs.read"]
+    app.registry = SimpleNamespace(_records={})
+    app._is_real_skill_tool = lambda match: (
+        match.skill == "web" and match.tool == "web_search")
+    captured = {}
+
+    def dispatch(text, match, via="intent_router"):
+        captured["text"] = text
+        captured["tool"] = match.tool
+        captured["args"] = match.args
+        captured["allowances"] = list(app._allowances)
+        return "searched"
+
+    app._dispatch_routed = dispatch
+    app.router = None
+
+    result = app._route_turn("search for jarvis on internet")
+
+    assert result == "searched"
+    assert captured["tool"] == "web_search"
+    assert captured["args"]["query"] == "jarvis"
+    assert "net.outbound" in captured["allowances"]
+    assert app._allowances == ["fs.read"]
+
+
+def test_open_youtube_routes_to_gated_browser_url():
+    app = object.__new__(ChatApp)
+    app.router = SimpleNamespace(route=lambda _text: SimpleNamespace(
+        skill="system", tool="launch_app", args={"app": "YouTube"},
+        fuzzy=False, confidence=1.0))
+    app.registry = SimpleNamespace(_records={})
+    app._pc = object()
+    captured = {}
+
+    def dispatch(text, match, via="intent_router"):
+        captured["tool"] = match.tool
+        captured["args"] = match.args
+        return "routed"
+
+    app._dispatch_routed = dispatch
+    assert app._route_turn("open youtube") == "routed"
+    assert captured == {
+        "tool": "pc.open_url",
+        "args": {"url": "https://www.youtube.com/"},
+    }
