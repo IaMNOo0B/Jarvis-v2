@@ -107,6 +107,8 @@ class PollinationsProvider:
         self._call = call
         self.name = name
         self.keys: List[str] = []  # keyless — nothing to rotate
+        # Public free-tier responses can be slower than the 5s chain default.
+        self.timeout = 15.0
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:
