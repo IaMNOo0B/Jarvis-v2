@@ -285,6 +285,10 @@ def test_structured_tool_failure_counts_as_failure_and_execution_attempt():
     assert len(results) == 2
     assert all(event["payload"]["ok"] is False for event in results)
     assert all("schema_error" in event["payload"]["output"] for event in results)
+    assert all(event["payload"]["evidence"]["status"] == "tool_reported_failure"
+               for event in results)
+    assert all(event["payload"]["evidence"]["postcondition_verified"] is False
+               for event in results)
 
 
 def test_failed_tool_cannot_be_followed_by_false_completion_claim():
@@ -359,6 +363,12 @@ def test_successful_retry_of_failed_tool_clears_unresolved_failure():
     assert result.status == "answered"
     assert len(attempts) == 2
     assert "saved successfully" in result.text
+    successful_results = [
+        event for event in brain.sessions.of_type("tool.result")
+        if event["payload"].get("ok") is True
+    ]
+    assert successful_results[-1]["payload"]["evidence"]["status"] == "tool_reported_success"
+    assert successful_results[-1]["payload"]["evidence"]["postcondition_verified"] is False
 
 
 def test_same_tool_with_different_arguments_does_not_clear_failure():
