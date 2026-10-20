@@ -907,7 +907,7 @@ def test_cloud_self_critique_redacts_original_user_text(fake_dcl_module):
 def test_large_tool_output_is_bounded_before_next_model_call():
     huge_output = "x" * 12000
     llm = ScriptedLLM([
-        "TOOL: get_time\\nARGS: {}",
+        "TOOL: get_time\nARGS: {}",
         "The tool returned data, but its output was truncated.",
     ])
     brain = make_brain(
