@@ -332,6 +332,33 @@ def test_unrelated_success_does_not_hide_previous_tool_failure():
     assert "saved successfully" not in result.text
 
 
+def test_successful_retry_of_failed_tool_clears_unresolved_failure():
+    attempts = []
+
+    def _sometimes_works(args):
+        attempts.append(len(attempts) + 1)
+        if len(attempts) == 1:
+            return {"ok": False, "error": "temporary write failure"}
+        return {"ok": True, "result": "file saved"}
+
+    llm = ScriptedLLM([
+        "TOOL: write_file\nARGS: {}",
+        "TOOL: write_file\nARGS: {}",
+        "The file was saved successfully.",
+    ])
+    brain = make_brain(
+        llm,
+        tools=[ToolDef(name="write_file", description="Write a file.",
+                       parameters={}, fn=_sometimes_works)],
+    )
+
+    result = brain.respond("s1", "save the file")
+
+    assert result.status == "answered"
+    assert len(attempts) == 2
+    assert "saved successfully" in result.text
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
