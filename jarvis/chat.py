@@ -737,8 +737,11 @@ class ChatApp:
         if text == "/quit":
             print("[stopped] Session saved. Goodbye, sir.")
             return True
+        if text == "/status":
+            print(self.status_report())
+            return True
         if text == "/help":
-            print("Commands: /quit, /session (show session id), "
+            print("Commands: /quit, /status (provider + learning health), /session (show session id), "
                   "/skills (list), /memory <fact> (remember), /recall <q>, "
                   "/key <paste-your-key> (store API key), /keys (list), "
                   "/keymove <wrong> <right> (fix misidentified key), "
