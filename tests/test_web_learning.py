@@ -138,3 +138,14 @@ def test_web_fetch_blocks_public_hostname_resolving_to_private_ip(monkeypatch):
     assert allowed is False
     assert "private" in reason.lower()
 
+def test_redirect_handler_rejects_redirect_to_localhost():
+    import urllib.error
+    import urllib.request
+
+    handler = web_skill._PublicRedirectHandler()
+    request = urllib.request.Request("https://example.com/start")
+    with pytest.raises(urllib.error.HTTPError, match="redirect blocked"):
+        handler.redirect_request(
+            request, None, 302, "Found", {}, "http://127.0.0.1/admin"
+        )
+
