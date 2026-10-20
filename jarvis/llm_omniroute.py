@@ -149,6 +149,9 @@ class OmniRouteProvider:
         self._call = call
         self.name = name
         self.keys: List[str] = []  # single gateway key; nothing to rotate
+        # Pass the gateway's configured timeout through FallbackChain rather
+        # than silently inheriting its shorter generic default.
+        self.timeout = call.timeout
 
     def respond(self, message: Any, key_index: int = 0,
                 timeout: float = 5.0) -> str:

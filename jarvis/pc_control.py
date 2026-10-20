@@ -552,6 +552,12 @@ def tool_definitions() -> list[dict]:
          "schema": {"type": "object",
                     "properties": {"name": {"type": "string"}},
                     "required": ["name"]}},
+        {"name": "pc.open_url", "tier": TIER_GUI,
+         "capabilities": ["ui.control"],
+         "description": "Open an HTTP or HTTPS URL in the default browser (tier-2, gated)",
+         "schema": {"type": "object",
+                    "properties": {"url": {"type": "string"}},
+                    "required": ["url"]}},
         {"name": "pc.find_text", "tier": TIER_READ,
          "capabilities": ["ui.read"],
          "description": "Find on-screen text via Windows OCR when the "

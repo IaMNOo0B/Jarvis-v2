@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import traceback
 from pathlib import Path
@@ -46,6 +47,52 @@ def preflight(base_dir: Path, data_dir: Path) -> list[str]:
     except Exception as exc:
         problems.append(f"data dir not writable: {data_dir} ({exc})")
     return problems
+
+
+def _is_simple_greeting(text: str) -> bool:
+    """Recognize only standalone greetings that need no model inference.
+
+    This keeps a dead or exhausted provider chain from making basic
+    conversational contact look broken. Do not match greetings embedded
+    in a real request such as 'hi, open Chrome'.
+    """
+    normalized = re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
+    normalized = " ".join(normalized.split())
+    return normalized in {
+        "hi", "hello", "hey", "hey jarvis", "hi jarvis", "hello jarvis",
+        "good morning", "good afternoon", "good evening",
+    }
+
+
+def _simple_chat_reply(text: str) -> str | None:
+    """Answer common social turns without asking a tool planner to guess."""
+    normalized = re.sub(r"[^a-z0-9\s]", "", (text or "").lower()).strip()
+    normalized = " ".join(normalized.split())
+    if _is_simple_greeting(normalized):
+        return "Hello, Sir. I'm here and ready to help."
+    if normalized in {
+        "how are you", "how are u", "how r you", "how r u",
+        "how are you doing", "how are you jarvis", "whats up",
+    }:
+        return "I'm doing well, Sir, and ready to help. How are you?"
+    if normalized in {"no", "nope", "nah", "not now"}:
+        return "No problem, Sir. What would you like to do next?"
+    if normalized in {"thanks", "thank you", "thanks jarvis", "thank you jarvis"}:
+        return "You're welcome, Sir."
+    return None
+
+
+def _ordered_providers(ollama_provider, keyed, omni_provider, poll_provider) -> list:
+    """Return the documented provider order without relying on argument position."""
+    providers = []
+    if ollama_provider is not None:
+        providers.append(ollama_provider)
+    providers.extend(keyed or [])
+    if omni_provider is not None:
+        providers.append(omni_provider)
+    if poll_provider is not None:
+        providers.append(poll_provider)
+    return providers
 
 
 def startup_warnings(data_dir: Path) -> list[str]:
@@ -389,18 +436,14 @@ class ChatApp:
             keyed = make_compat_providers(data_dir=str(self.data_dir))
         except Exception:
             pass
-        # Order: keyed cloud (smartest) -> Ollama local -> OmniRoute ->
-        # keyless Pollinations. The owner's keys win when they exist.
-        providers = []
-        providers.extend(keyed)
-        if ollama_provider is not None:
-            providers.append(ollama_provider)
-        if omni_provider is not None:
-            providers.append(omni_provider)
-        if poll_provider is not None:
-            providers.append(poll_provider)
+        # Deterministic order: local Ollama first (when healthy), then
+        # keyed cloud providers, then OmniRoute, then keyless Pollinations.
+        # Do not call local_first(*providers) with keyed providers first:
+        # local_first treats its FIRST argument as the local provider.
+        providers = _ordered_providers(
+            ollama_provider, keyed, omni_provider, poll_provider)
         if providers:
-            chain = FallbackChain.local_first(*providers)
+            chain = FallbackChain(providers)
             llm_call = chain_as_llm_call(chain)
             # F-08: keep the chain so the GUI pill can read last_via.
             self._chain: "FallbackChain | None" = chain
@@ -691,6 +734,43 @@ class ChatApp:
         parameter, and inventing one is a brain change, not wiring.
         Routing failures degrade to None: routing NEVER breaks a turn.
         """
+        from types import SimpleNamespace
+
+        # Explicit search commands have a deterministic tool + argument.
+        # Grant net.outbound only for this user-requested search, then restore
+        # the normal turn allowances immediately after gated dispatch.
+        normalized = re.sub(r"[^\w\s:/.-]", "", (text or "").lower(), flags=re.UNICODE)
+        normalized = " ".join(normalized.split())
+        query = None
+        for prefix in ("search the internet for ", "search internet for ",
+                       "search for ", "search ", "look up ", "google "):
+            if normalized.startswith(prefix):
+                query = normalized[len(prefix):].strip()
+                break
+        if query:
+            query = re.sub(r"\s+(?:on|over)\s+(?:the\s+)?internet$", "", query).strip()
+            if query:
+                search_match = SimpleNamespace(
+                    skill="web", tool="web_search",
+                    args={"query": query, "max_results": 5},
+                    fuzzy=False, confidence=1.0)
+                if self._is_real_skill_tool(search_match):
+                    previous_allowances = self._allowances
+                    self._allowances = list(dict.fromkeys(
+                        [*previous_allowances, "net.outbound"]))
+                    try:
+                        return self._dispatch_routed(text, search_match)
+                    except Exception as exc:
+                        print(f"[router] search dispatch failed: "
+                              f"{type(exc).__name__}: {exc}")
+                        from jarvis.brain import TurnResult
+                        return TurnResult(
+                            status="answered",
+                            text="I couldn't complete that web search, sir. "
+                                 "Please check the diagnostic log.")
+                    finally:
+                        self._allowances = previous_allowances
+
         router = getattr(self, "router", None)
         if router is None:
             return None
@@ -701,12 +781,46 @@ class ChatApp:
         if match is None or match.fuzzy or match.confidence < 1.0:
             return None  # fuzzy args are provisional — the LLM's turn
         if not self._is_real_skill_tool(match):
-            return None  # virtual system intent: the brain's own pc.*
-            # gate flow owns it; the words alone never execute here
+            # Exact app/site requests still pass through the same Gate.
+            if (match.skill == "system" and match.tool == "launch_app"
+                    and self._pc is not None):
+                app_name = str((match.args or {}).get("app", "")).strip()
+                if not app_name:
+                    return None
+                sites = {
+                    "youtube": "https://www.youtube.com/",
+                    "google": "https://www.google.com/",
+                    "gmail": "https://mail.google.com/",
+                    "github": "https://github.com/",
+                    "chatgpt": "https://chatgpt.com/",
+                    "reddit": "https://www.reddit.com/",
+                    "instagram": "https://www.instagram.com/",
+                    "facebook": "https://www.facebook.com/",
+                }
+                normalized_app = " ".join(app_name.lower().split())
+                if normalized_app in sites:
+                    match = SimpleNamespace(
+                        skill="pc", tool="pc.open_url",
+                        args={"url": sites[normalized_app]},
+                        fuzzy=False, confidence=1.0)
+                else:
+                    match = SimpleNamespace(
+                        skill="pc", tool="pc.launch_app",
+                        args={"name": app_name}, fuzzy=False, confidence=1.0)
+            else:
+                return None  # other virtual intents remain model-mediated
         try:
             return self._dispatch_routed(text, match)
-        except Exception:
-            return None
+        except Exception as exc:
+            # Preserve the actual failure rather than silently disguising it
+            # as a generic model reply or retrying the same intent via LLM.
+            print(f"[router] dispatch failed for {match.tool}: "
+                  f"{type(exc).__name__}: {exc}")
+            from jarvis.brain import TurnResult
+            return TurnResult(
+                status="answered",
+                text="I couldn't complete that action safely, sir. "
+                     "Please check the diagnostic log.")
 
     def _dispatch_routed(self, text: str, match, via: str = "intent_router"):
         """Execute one routed hit through the gate, brain-style.
@@ -846,6 +960,27 @@ class ChatApp:
         if match.tool == "reminder_cancel":
             return ("Reminder cancelled, sir." if data.get("cancelled")
                     else "That reminder wasn't pending, sir.")
+        if match.tool == "pc.launch_app":
+            if data.get("ok") is False:
+                return f"That didn't work, sir: {data.get('error', data.get('reason', 'app launch failed'))}"
+            return f"Opened {match.args.get('name', 'the app')}, sir."
+        if match.tool == "pc.open_url":
+            if data.get("ok") is False:
+                return f"That didn't work, sir: {data.get('error', data.get('reason', 'browser launch failed'))}"
+            return f"Opened {match.args.get('url', 'the website')} in your default browser, sir."
+        if match.tool == "web_search":
+            if data.get("ok") is False:
+                return f"Search failed, sir: {data.get('message', data.get('error', 'unknown search error'))}"
+            payload = data.get("result") if isinstance(data.get("result"), dict) else data
+            results = payload.get("results") or []
+            if not results:
+                return f"I searched for '{payload.get('query', match.args.get('query', ''))}', sir, but found no results."
+            lines = []
+            for item in results[:5]:
+                title = str(item.get("title") or "Untitled result").strip()
+                url = str(item.get("url") or "").strip()
+                lines.append(f"- {title}" + (f" — {url}" if url else ""))
+            return "Here are the web results, sir:\n" + "\n".join(lines)
         if data.get("ok") is False:
             return (f"That didn't work, sir: "
                     f"{data.get('error', data.get('reason', 'unknown error'))}")
@@ -1125,7 +1260,9 @@ class ChatApp:
             self.brain._learned_context = store.format_for_prompt(pairs)
         except Exception:
             self.brain._learned_context = ""
-        print("[thinking]")
+        simple_reply = _simple_chat_reply(text)
+        if simple_reply is None:
+            print("[thinking]")
         # CapNet outcome watermark: events with seq beyond this belong
         # to THIS turn; _record_turn_outcomes reads them back at the
         # end of the turn for the network's feedback loop.
@@ -1135,31 +1272,48 @@ class ChatApp:
             turn_mark = _prior[-1]["seq"] if _prior else 0
         except Exception:
             turn_mark = None
-        result = None
-        try:
-            result = self._route_turn(text)
-        except Exception:
-            result = None  # the intent tier must never break a turn
-        if result is None:
-            # Capability-network tier: deterministic intents already
-            # had their chance above and still win; the network routes
-            # only unambiguous, named, tier-1 tasks (see
-            # _capnet_dispatchable) and merely records its plan for
-            # everything else.
+
+        if simple_reply is not None:
+            # Social turns bypass inference, but still participate in the
+            # normal event, audit, digest, and learning lifecycle.
+            from jarvis.brain import TurnResult
+            user_ev = None
             try:
-                result = self._capnet_route_turn(text)
-            except Exception:
-                result = None  # the network tier must never break a turn
-        brain_used = result is None
-        if result is None:
-            try:
-                result = self.brain.respond(self.session_id, text,
-                                            self._allowances)
+                user_ev = self.store.emit(
+                    self.session_id, "user.message", {"text": text},
+                    actor="user", trust="user")
+                self.store.emit(
+                    self.session_id, "brain.reply", {"text": simple_reply},
+                    actor="brain", trust="user", causal_parent=user_ev)
             except Exception as exc:
-                print(f"[error] Brain failed honestly: {exc}")
-                traceback.print_exc()
-                self._flush_routine_events()
-                return
+                print(f"[warn] Could not persist simple chat turn: {exc}")
+            result = TurnResult(status="answered", text=simple_reply)
+            brain_used = False
+        else:
+            result = None
+            try:
+                result = self._route_turn(text)
+            except Exception:
+                result = None  # the intent tier must never break a turn
+            if result is None:
+                # Capability-network tier: deterministic intents already
+                # had their chance above and still win; the network routes
+                # only unambiguous, named, tier-1 tasks and merely records
+                # its plan for everything else.
+                try:
+                    result = self._capnet_route_turn(text)
+                except Exception:
+                    result = None  # the network tier must never break a turn
+            brain_used = result is None
+            if result is None:
+                try:
+                    result = self.brain.respond(self.session_id, text,
+                                                self._allowances)
+                except Exception as exc:
+                    print(f"[error] Brain failed honestly: {exc}")
+                    traceback.print_exc()
+                    self._flush_routine_events()
+                    return
         if result.status == "approval_required":
             req = result.approval_request or {}
             gate_req = req.get("request", {}) or {}
@@ -1264,11 +1418,28 @@ class ChatApp:
             return self._pc.type_into_field(args["element_id"], args.get("text", ""))
         if op == "key":
             return self._pc.press_key(args.get("key", ""))
+        if op == "launch_app":
+            return self._pc.launch_app(args["name"])
+        if op == "open_url":
+            url = str(args.get("url", "")).strip()
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ValueError("only complete HTTP/HTTPS URLs can be opened")
+            import webbrowser
+            if not webbrowser.open(url, new=2):
+                raise RuntimeError("Windows did not confirm that the browser opened")
+            return {"ok": True, "url": url, "detail": "opened in the default browser"}
         if op == "ground":
             return self._pc.ground_target(args["query"])
         raise RuntimeError(f"unknown pc op: {op}")
 
     def _executor(self, tool_name: str, args: dict):
+        # Approved PC actions must return to the PC controller. Sending these
+        # through SkillRegistry fails because pc.* tools live in the Gate
+        # registry, not under skills/.
+        if tool_name.startswith("pc.") and self._pc is not None:
+            return self._pc_call(tool_name, args)
         from jarvis.skills.registry import SkillContext
         ctx = SkillContext(
             skill_name="chat", capabilities=self._allowances,
@@ -1523,6 +1694,12 @@ class ChatApp:
         """Handle /commands. Returns True if text was a command (so the
         caller must NOT send it to the brain). The GUI and CLI both call
         this — a /key pasted in the window can never reach the brain."""
+        text = (text or "").strip()
+        if text.startswith("/"):
+            # Command names are case-insensitive, while argument values
+            # (including API keys) retain their original case.
+            parts = text.split(None, 1)
+            text = parts[0].lower() + (" " + parts[1] if len(parts) > 1 else "")
         if text == "/quit":
             print("[stopped] Session saved. Goodbye, sir.")
             return True
@@ -1755,7 +1932,7 @@ class ChatApp:
                 break
             if not text:
                 continue
-            if text == "/quit":
+            if text.lower() == "/quit":
                 break
             if self.handle_command(text):
                 continue

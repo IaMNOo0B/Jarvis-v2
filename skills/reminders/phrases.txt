@@ -8,6 +8,16 @@
 [SetReminder] remind me in {in_minutes:int} minutes to {text} -> reminder_set
 [SetReminder] remind me in {in_minutes:int} minutes about {text} -> reminder_set
 [SetReminder] set a reminder in {in_minutes:int} minutes for {text} -> reminder_set
+[SetReminder] remind me after {in_minutes:int} minutes to {text} -> reminder_set
+[SetReminder] remind me after {in_minutes:int} minute to {text} -> reminder_set
+[SetReminder] remind me in {in_minutes:int} minute to {text} -> reminder_set
+[SetReminder] remind me after {in_minutes:int} min to {text} -> reminder_set
+[SetReminder] remind me after {in_minutes:int} min of {text} -> reminder_set
+[SetReminder] remind me in {in_minutes:int} min to {text} -> reminder_set
+[ListReminders] is there any reminder set -> reminder_list
+[ListReminders] are any reminders set -> reminder_list
+[ListReminders] do i have any reminders -> reminder_list
+[ListReminders] any reminders set -> reminder_list
 [ListReminders] mere reminders dikhao -> reminder_list
 [ListReminders] reminders dikhao -> reminder_list
 [ListReminders] show my reminders -> reminder_list

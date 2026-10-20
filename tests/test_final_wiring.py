@@ -162,8 +162,10 @@ def _pairs_file(app) -> Path:
 
 
 def test_poisoned_correction_is_not_saved(app, capsys):
-    app.turn("hello")  # stub greeting: answered, sets _last_exchange
+    app.turn("hello")  # deterministic greeting: answered, sets _last_exchange
     capsys.readouterr()
+    app.brain.respond = lambda *_a, **_k: TurnResult(
+        status="answered", text="Understood, sir.")
     app.turn("no, that is beyond my capabilities instead")
     out = capsys.readouterr().out
     assert "Skipped" in out
@@ -176,6 +178,8 @@ def test_poisoned_correction_is_not_saved(app, capsys):
 def test_good_correction_is_saved(app, capsys):
     app.turn("hello")
     capsys.readouterr()
+    app.brain.respond = lambda *_a, **_k: TurnResult(
+        status="answered", text="Understood, sir.")
     app.turn("no, just say the time loudly instead")
     out = capsys.readouterr().out
     assert "Noted your correction" in out
