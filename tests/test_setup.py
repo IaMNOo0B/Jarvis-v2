@@ -439,6 +439,6 @@ def test_desktop_chat_grants_web_and_approved_sandbox_capabilities():
 
     assert "net.outbound" in TURN_ALLOWANCES
     assert "exec" in TURN_ALLOWANCES
-    # Shell execution remains a distinct capability; this does not grant it.
+    # PC shell execution remains a distinct capability added only when PC control is enabled.
     assert "shell.exec" not in TURN_ALLOWANCES
 
