@@ -124,13 +124,25 @@ def _validate_public_url(url: str) -> tuple[bool, str]:
         return False, f"Invalid URL: {exc}"
 
 
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Revalidate every redirect target to prevent public-to-private pivots."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        allowed, reason = _validate_public_url(newurl)
+        if not allowed:
+            raise urllib.error.HTTPError(
+                newurl, code, f"redirect blocked: {reason}", headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _fetch(url: str) -> Dict[str, Any]:
     allowed, reason = _validate_public_url(url)
     if not allowed:
         return {"ok": False, "code": "bad_url", "message": reason}
     req = urllib.request.Request(url, headers=_UA)
     try:
-        with urllib.request.urlopen(req, timeout=20) as resp:
+        opener = urllib.request.build_opener(_PublicRedirectHandler())
+        with opener.open(req, timeout=20) as resp:
             raw = resp.read(500_000).decode("utf-8", "replace")  # 500KB cap
     except Exception as exc:
         return {"ok": False, "code": "fetch_failed",
