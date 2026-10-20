@@ -688,7 +688,12 @@ class Brain:
                 if tool is None or tool.fn is None:
                     consecutive_failures += 1
                     self._log(session_id, "tool.result",
-                              {"ok": False, "error": f"tool '{name}' is not registered"},
+                              {"ok": False, "error": f"tool '{name}' is not registered",
+                               "evidence": {
+                                   "kind": "tool_return",
+                                   "status": "tool_not_registered",
+                                   "postcondition_verified": False,
+                               }},
                               causal_parent=call_ev, actor="tool",
                               trust="tool_untrusted")
                     messages.append({"role": "tool", "name": name,
@@ -731,8 +736,17 @@ class Brain:
                         content[:MAX_TOOL_OUTPUT_CHARS]
                         + f" [TRUNCATED: omitted {omitted_chars} characters of tool output]"
                     )
+                # This event proves what the tool returned, not necessarily
+                # the external postcondition (for example, that a UI visibly
+                # changed or a remote message was received).
                 self._log(session_id, "tool.result",
-                          {"ok": ok, "output": content[:2000]},
+                          {"ok": ok, "output": content[:2000],
+                           "evidence": {
+                               "kind": "tool_return",
+                               "status": ("tool_reported_success" if ok
+                                          else "tool_reported_failure"),
+                               "postcondition_verified": False,
+                           }},
                           causal_parent=call_ev, actor="tool",
                           trust="tool_untrusted")
                 last_parent = call_ev
