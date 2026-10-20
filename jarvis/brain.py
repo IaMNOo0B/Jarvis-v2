@@ -507,6 +507,7 @@ class Brain:
         # A later successful tool result clears this issue.
         last_action_issue = None
         last_failed_tool_name = None
+        last_failed_tool_args = None
         last_parent = user_ev
 
         while True:
@@ -678,6 +679,9 @@ class Brain:
                     last_parent = call_ev
                     last_action_issue = f"tool '{name}' is not registered"
                     last_failed_tool_name = name
+                    last_failed_tool_args = json.dumps(
+                        args, sort_keys=True, ensure_ascii=False, default=str
+                    )
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
                             session_id, last_parent, tool_calls_made, rounds, messages,
@@ -708,6 +712,9 @@ class Brain:
                     consecutive_failures += 1
                     last_action_issue = f"tool '{name}' failed: {content[:300]}"
                     last_failed_tool_name = name
+                    last_failed_tool_args = json.dumps(
+                        args, sort_keys=True, ensure_ascii=False, default=str
+                    )
                     messages.append({"role": "tool", "name": name, "content": content})
                     if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                         return self._honest_stop(
@@ -719,9 +726,14 @@ class Brain:
                 consecutive_failures = 0
                 # A successful unrelated tool does not erase a previous failure.
                 # Clear it only when the same failed tool later succeeds.
-                if name == last_failed_tool_name:
+                current_tool_args = json.dumps(
+                    args, sort_keys=True, ensure_ascii=False, default=str
+                )
+                if (name == last_failed_tool_name
+                        and current_tool_args == last_failed_tool_args):
                     last_action_issue = None
                     last_failed_tool_name = None
+                    last_failed_tool_args = None
                 wrapped = self.gate.wrap_output(content, name)
                 messages.append({"role": "tool", "name": name, "content": wrapped})
 
