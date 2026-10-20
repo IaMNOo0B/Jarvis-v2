@@ -119,6 +119,8 @@ tool and exact arguments, and an
 unrelated success does not erase it. Gate-denied actions are also unresolved
 because they never ran. If any issue remains unresolved, JARVIS stops honestly
 instead of claiming completion.
+Tool output is treated as untrusted and capped before it enters the next model
+prompt; oversized results carry a visible truncation marker.
 
 External research and adoption decisions are tracked in
 [docs/EXTERNAL-RESEARCH-AND-ADOPTION.md](docs/EXTERNAL-RESEARCH-AND-ADOPTION.md).
