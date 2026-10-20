@@ -8,6 +8,10 @@ on:
       - fix/gui-quit-and-stale-launch-lock
   workflow_dispatch:
 
+concurrency:
+  group: jarvis-tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   unit-tests:
     runs-on: windows-latest
