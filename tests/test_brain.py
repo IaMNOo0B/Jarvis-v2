@@ -878,7 +878,7 @@ def test_auto_learning_skips_contact_and_prompt_injection_content():
 def test_self_critique_can_be_enabled_for_answer_review():
     llm = ScriptedLLM([
         "This answer is intentionally longer than fifty characters so the review runs.",
-        "VIOLATIONS: none\\nREVISED: NO CHANGE NEEDED",
+        "VIOLATIONS: none\nREVISED: NO CHANGE NEEDED",
     ])
     brain = make_brain(llm, self_critique=True)
 
@@ -891,7 +891,7 @@ def test_self_critique_can_be_enabled_for_answer_review():
 def test_cloud_self_critique_redacts_original_user_text(fake_dcl_module):
     llm = ScriptedLLM([
         "This is a deliberately long answer so that the self-critique stage is triggered.",
-        "VIOLATIONS: none\\nREVISED: NO CHANGE NEEDED",
+        "VIOLATIONS: none\nREVISED: NO CHANGE NEEDED",
     ])
     brain = make_brain(llm, off_machine=True, self_critique=True)
 
