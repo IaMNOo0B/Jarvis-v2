@@ -353,6 +353,18 @@ def test_no_fake_user_messages_in_history():
     assert user_msgs[0]["content"] == "do it"
 
 
+def test_model_protocol_addresses_user_only_as_sir():
+    llm = ScriptedLLM(["Hello, Sir."])
+    brain = make_brain(llm)
+
+    prompt = brain._system_prompt()
+
+    assert "Sir's personal AI assistant" in prompt
+    assert 'Address the user only as "Sir"' in prompt
+    assert "Owais's personal AI assistant" not in prompt
+    assert 'Good: "Bhai Python' not in prompt
+
+
 def test_persona_comes_from_rules_not_hardcoded():
     llm = ScriptedLLM(["hi"])
     rules = FakeRules({"P2-1": "UNIQUE-PERSONA-MARKER-123",
