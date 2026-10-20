@@ -16,7 +16,7 @@ from jarvis.brain import (
     FallbackChain,
     ProviderHTTPError,
 )
-from jarvis.chat_gui import TurnToken, _GuiWriter
+from jarvis.chat_gui import TurnToken, _GuiWriter, _display_user_input
 from jarvis.llm_compat import fingerprint_key, probe_key
 
 
@@ -191,3 +191,12 @@ def test_key_restart_message_surfaces_through_capture():
     kind, text = q.get_nowait()
     assert kind == "out"
     assert "Restart JARVIS to use it, sir." in text
+
+
+
+def test_api_key_commands_are_masked_in_the_gui_transcript():
+    assert _display_user_input("/key gemini super-secret-value") == (
+        "/key [API key hidden]")
+    assert _display_user_input("/KEY super-secret-value") == (
+        "/key [API key hidden]")
+    assert _display_user_input("open Chrome") == "open Chrome"
