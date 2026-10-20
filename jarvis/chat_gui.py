@@ -32,6 +32,13 @@ from pathlib import Path
 from typing import Callable
 
 
+def _display_user_input(text: str) -> str:
+    """Never echo a pasted API key into the visible GUI transcript."""
+    if re.match(r"^\s*/key(?:\s|$)", text or "", flags=re.IGNORECASE):
+        return "/key [API key hidden]"
+    return text
+
+
 class _GuiWriter(io.TextIOBase):
     """stdout replacement: lines go to a queue for the UI thread.
 
@@ -689,7 +696,7 @@ class ChatWindow:
             return
         self.entry.delete(0, "end")
         self.entry.configure(state="disabled")
-        self._say("you", "You: " + text + "\n")
+        self._say("you", "You: " + _display_user_input(text) + "\n")
         self._set_activity("thinking")
         token = self._turns.new_turn()  # captured on the UI thread — no race
         self._worker = threading.Thread(target=self._run_turn,
