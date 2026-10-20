@@ -68,3 +68,24 @@ def test_system_launch_does_not_route_when_pc_control_is_disabled():
     )
 
     assert app._route_turn("Chrome kholo") is None
+
+def test_reminder_grammar_covers_common_natural_phrasing():
+    from pathlib import Path
+    from jarvis.intent_router import IntentRouter
+
+    root = Path(__file__).resolve().parent.parent
+    router = IntentRouter()
+    router.load_skills_root(root / "skills")
+    router.load_phrases(
+        "system", (root / "jarvis" / "system_phrases.txt").read_text(encoding="utf-8")
+    )
+
+    match = router.route("remind me after 1 min of doing hw")
+    assert match is not None and match.fuzzy is False
+    assert match.skill == "reminders"
+    assert match.tool == "reminder_set"
+    assert match.args == {"in_minutes": 1, "text": "doing hw"}
+
+    listed = router.route("is there any reminder set")
+    assert listed is not None and listed.fuzzy is False
+    assert listed.tool == "reminder_list"
