@@ -94,8 +94,7 @@
       "output_cap_chars": 4000,
       "capabilities": [
         "net.outbound",
-        "fs.write",
-        "time.read"
+        "fs.write"
       ]
     },
     {
