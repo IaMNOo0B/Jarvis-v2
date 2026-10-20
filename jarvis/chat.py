@@ -342,12 +342,13 @@ class ChatApp:
             keyed = make_compat_providers(data_dir=str(self.data_dir))
         except Exception:
             pass
-        # Order: keyed cloud (smartest) -> Ollama local -> OmniRoute ->
-        # keyless Pollinations. The owner's keys win when they exist.
+        # Match the knowledge-book routing policy: local daily driver first,
+        # then configured cloud providers as fallbacks. If Ollama is absent,
+        # the first available cloud provider is used; status reports that fact.
         providers = []
-        providers.extend(keyed)
         if ollama_provider is not None:
             providers.append(ollama_provider)
+        providers.extend(keyed)
         if omni_provider is not None:
             providers.append(omni_provider)
         if poll_provider is not None:
