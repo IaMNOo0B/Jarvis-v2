@@ -747,9 +747,11 @@ class Brain:
                 current_tool_args = json.dumps(
                     args, sort_keys=True, ensure_ascii=False, default=str
                 )
+                # Any exact action that succeeds resolves only its own failure.
+                # Do not require it to be the most recently failed action.
+                unresolved_actions.pop((name, current_tool_args), None)
                 if (name == last_failed_tool_name
                         and current_tool_args == last_failed_tool_args):
-                    unresolved_actions.pop((name, current_tool_args), None)
                     last_action_issue = None
                     last_failed_tool_name = None
                     last_failed_tool_args = None
