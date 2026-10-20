@@ -945,6 +945,25 @@ class ChatApp:
         if match.tool == "reminder_cancel":
             return ("Reminder cancelled, sir." if data.get("cancelled")
                     else "That reminder wasn't pending, sir.")
+        if match.tool == "pc.launch_app":
+            if data.get("ok") is False:
+                return f"That didn't work, sir: {data.get('error', data.get('reason', 'app launch failed'))}"
+            return f"Opened {match.args.get('name', 'the app')}, sir."
+        if match.tool == "pc.open_url":
+            if data.get("ok") is False:
+                return f"That didn't work, sir: {data.get('error', data.get('reason', 'browser launch failed'))}"
+            return f"Opened {match.args.get('url', 'the website')} in your default browser, sir."
+        if match.tool == "web_search":
+            payload = data.get("result") if isinstance(data.get("result"), dict) else data
+            results = payload.get("results") or []
+            if not results:
+                return f"I searched for '{payload.get('query', match.args.get('query', ''))}', sir, but found no results."
+            lines = []
+            for item in results[:5]:
+                title = str(item.get("title") or "Untitled result").strip()
+                url = str(item.get("url") or "").strip()
+                lines.append(f"- {title}" + (f" — {url}" if url else ""))
+            return "Here are the web results, sir:\\n" + "\\n".join(lines)
         if data.get("ok") is False:
             return (f"That didn't work, sir: "
                     f"{data.get('error', data.get('reason', 'unknown error'))}")
