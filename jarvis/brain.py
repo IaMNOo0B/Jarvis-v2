@@ -254,13 +254,30 @@ class Brain:
         lines.append("Available tools (use only these exact names):")
         for t in self.tools.values():
             schema = t.parameters or {}
-            # Models need the argument names, types, and descriptions—not
-            # only the required-slot list—to call real tools reliably.
+            # Models need argument names, types, and descriptions—not only
+            # required slots. Keep this summary compact so tool metadata does
+            # not crowd conversation history out of the fixed context budget.
+            properties = schema.get("properties", {})
+            compact_properties = {}
+            for name, spec in properties.items():
+                if not isinstance(spec, dict):
+                    continue
+                compact_properties[name] = {
+                    key: spec[key]
+                    for key in ("type", "description", "enum", "items",
+                                "minimum", "maximum", "default")
+                    if key in spec
+                }
+            schema_summary = {
+                "required": schema.get("required", []),
+                "properties": compact_properties,
+            }
             schema_text = json.dumps(
-                schema, ensure_ascii=False, separators=(",", ":"), default=str)
+                schema_summary, ensure_ascii=False,
+                separators=(",", ":"), default=str)
             lines.append(
                 f"- {t.name}: {t.description}\n"
-                f"  Parameters schema: {schema_text}"
+                f"  Arguments: {schema_text}"
             )
         return "\n".join(lines)
 
