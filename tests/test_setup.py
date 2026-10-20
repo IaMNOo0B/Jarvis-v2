@@ -519,8 +519,9 @@ def test_status_report_shows_provider_and_learning_state_without_secrets(tmp_pat
     report = app.status_report()
 
     assert "Last response provider: ollama" in report
-    assert "Available providers: ollama" in report
-    assert "Local episodic learning: on" in report
+    assert "Providers in fallback chain (not all health-checked): ollama" in report
+    assert "Memory recall: on" in report
+    assert "Automatic episode capture: off (opt-in; recommended default)" in report
     assert "Self-critique: on" in report
     assert "Saved web-learning notes: 1" in report
     assert "example" in report
