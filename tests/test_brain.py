@@ -115,14 +115,15 @@ class ScriptedLLM:
 
 
 def make_brain(llm, gate=None, store=None, rules=None, tools=None,
-               off_machine=False):
+               off_machine=False, max_rounds=3, max_tool_calls=12):
     tools = tools if tools is not None else [
         ToolDef(name="get_time", description="Current time.", parameters={},
                 fn=lambda args: "12:00"),
     ]
     return Brain(gate=gate or FakeGate(), session_store=store or FakeSessionStore(),
                  rules=rules or FakeRules(), llm_call=llm,
-                 tools=tools, llm_off_machine=off_machine)
+                 tools=tools, llm_off_machine=off_machine,
+                 max_rounds=max_rounds, max_tool_calls=max_tool_calls)
 
 
 @pytest.fixture
@@ -551,4 +552,23 @@ def test_system_prompt_exposes_tool_parameter_schema():
     assert '"max_results"' in prompt
     assert '"type":"integer"' in prompt
     assert '"required":["query"]' in prompt
+
+def test_configured_round_limit_is_applied():
+    llm = ScriptedLLM(["TOOL: get_time\nARGS: {}", "The time is 12:00."])
+    brain = make_brain(llm, max_rounds=1)
+
+    result = brain.respond("s1", "check the time")
+
+    assert result.status == "stopped"
+    assert result.rounds_used == 1
+    assert result.tool_calls_made == 1
+    assert "1 thinking rounds" in result.text
+    assert llm.calls == 1
+
+
+def test_configured_budgets_are_clamped_to_safe_ranges():
+    brain = make_brain(ScriptedLLM(["hello"]), max_rounds=100, max_tool_calls=1000)
+
+    assert brain.max_rounds == 10
+    assert brain.max_tool_calls == 50
 
