@@ -457,7 +457,7 @@ class ChatApp:
         pc = getattr(self, "_pc", None)
         ollama = getattr(self, "_ollama_status", "not checked")
         memory = "available" if getattr(self, "memory", None) is not None else "unavailable"
-        return "\\n".join([
+        return "\n".join([
             "JARVIS doctor (read-only; no repairs or installs performed):",
             f"- Brain provider chain: {', '.join(providers)}",
             f"- Last response provider: {getattr(self, 'last_provider', 'unknown')}",
@@ -798,7 +798,8 @@ class ChatApp:
             print(self.doctor_report())
             return True
         if text == "/help":
-            print("Commands: /quit, /status (provider + learning health), /doctor (read-only readiness checks), /session (show session id), 
+            print("Commands: /quit, /status (provider + learning health), "
+                  "/doctor (read-only readiness checks), /session (show session id), "
                   "/skills (list), /memory <fact> (remember), /recall <q>, "
                   "/key <paste-your-key> (store API key), /keys (list), "
                   "/keymove <wrong> <right> (fix misidentified key), "
