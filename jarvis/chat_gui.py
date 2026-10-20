@@ -350,6 +350,14 @@ def main() -> None:
     def build() -> None:
         try:
             app = ChatApp(base_dir, data_dir)
+        except SystemExit as exc:
+            # ChatApp uses sys.exit when mandatory safety rules cannot load.
+            # A worker-thread SystemExit would otherwise leave the GUI stuck
+            # forever on "warming up…" with no explanation.
+            detail = "Mandatory JARVIS rules could not be loaded." if exc.code else "Startup was stopped."
+            window.q.put(("out", f"[error] Startup failed: {detail}\n"))
+            window.q.put(("state", ("startup failed", "#d32f2f")))
+            return
         except Exception as exc:  # startup failed — say so in the window
             window.q.put(("out", f"[error] Startup failed: {exc}\n"))
             window.q.put(("state", ("startup failed", "#d32f2f")))
