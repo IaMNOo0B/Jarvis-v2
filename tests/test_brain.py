@@ -308,6 +308,30 @@ def test_failed_tool_cannot_be_followed_by_false_completion_claim():
     assert "Done, I successfully saved" not in result.text
 
 
+def test_unrelated_success_does_not_hide_previous_tool_failure():
+    def _failure(args):
+        return {"ok": False, "error": "permission denied"}
+
+    llm = ScriptedLLM([
+        "TOOL: write_file\\nARGS: {}",
+        "TOOL: get_time\\nARGS: {}",
+        "Done, the file was saved successfully.",
+    ])
+    brain = make_brain(
+        llm,
+        tools=[
+            ToolDef(name="write_file", description="Write a file.", parameters={}, fn=_failure),
+            ToolDef(name="get_time", description="Current time.", parameters={}, fn=lambda a: "12:00"),
+        ],
+    )
+
+    result = brain.respond("s1", "save the file and check the time")
+
+    assert result.status == "stopped"
+    assert "permission denied" in result.text
+    assert "saved successfully" not in result.text
+
+
 def test_max_tool_calls_cap():
     # 5 tool calls per reply x 3 rounds -> the 12-call cap fires mid-round-3.
     reply = "\n".join(f"TOOL: get_time\nARGS: {{\"i\": {i}}}" for i in range(5))
