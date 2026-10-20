@@ -1401,6 +1401,11 @@ class ChatApp:
         raise RuntimeError(f"unknown pc op: {op}")
 
     def _executor(self, tool_name: str, args: dict):
+        # Approved PC actions must return to the PC controller. Sending these
+        # through SkillRegistry fails because pc.* tools live in the Gate
+        # registry, not under skills/.
+        if tool_name.startswith("pc.") and self._pc is not None:
+            return self._pc_call(tool_name, args)
         from jarvis.skills.registry import SkillContext
         ctx = SkillContext(
             skill_name="chat", capabilities=self._allowances,
