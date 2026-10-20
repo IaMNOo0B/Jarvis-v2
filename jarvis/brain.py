@@ -532,7 +532,12 @@ class Brain:
                             ) if hasattr(self.rules, "all") else ""
                         except Exception:
                             pass
-                        critic = SelfCritique(self.llm_call, rules_text)
+                        # The critique prompt contains the original user
+                        # message and draft, so it must pass through the same
+                        # DCL redaction as every other off-machine model call.
+                        def critique_llm(messages):
+                            return self.llm_call(self._redact_messages(messages))
+                        critic = SelfCritique(critique_llm, rules_text)
                         result = critic.review(payload, user_text)
                         if result.revised and result.final_text:
                             final_text = result.final_text
